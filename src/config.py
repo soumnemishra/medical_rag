@@ -57,6 +57,20 @@ class Settings(BaseSettings):
         default="gemini-2.0-flash",
         description="Gemini model to use"
     )
+
+    # Ollama Configuration
+    OLLAMA_BASE_URL: str = Field(
+        default="http://localhost:11434",
+        description="Ollama API base URL"
+    )
+    OLLAMA_MODEL: str = Field(
+        default="llama3.2:3b",
+        description="Ollama model to use"
+    )
+    USE_OLLAMA: bool = Field(
+        default=True,
+        description="Use Ollama instead of Gemini"
+    )
     
     # PubMed Configuration
     PUBMED_BASE_URL: str = Field(
