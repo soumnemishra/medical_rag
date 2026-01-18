@@ -371,3 +371,153 @@ flowchart TB
     backtrack -->|max iterations| done
     done --> END
 """
+
+
+# =============================================================================
+# Enhanced Graph Builder (MA-RAG Style)
+# =============================================================================
+
+def build_enhanced_graph() -> StateGraph:
+    """
+    Build the enhanced agentic RAG graph with MA-RAG style step execution.
+    
+    This version uses:
+    - Step-wise plan execution (loop through each step)
+    - Task classification (search vs aggregate)
+    - Per-step confidence tracking
+    - Plan summarization for final answer
+    
+    Flow:
+        PLAN → STEP_EXECUTOR (loop) → SUMMARIZE → DONE/BACKTRACK
+    
+    Returns:
+        Compiled LangGraph StateGraph with enhanced features
+    """
+    from src.agents.planner import planner_node_sync
+    from src.agents.plan_summarizer import summarizer_node_sync as plan_summarizer_sync
+    from src.orchestrator.step_executor import build_step_executor, create_executor_initial_state
+    
+    logger.info("Building enhanced agentic graph with step executor")
+    
+    # Build step executor subgraph
+    step_executor = build_step_executor()
+    
+    def plan_node_enhanced(state: GraphState) -> Dict[str, Any]:
+        """Plan with the real planner agent."""
+        return planner_node_sync(state)
+    
+    def execute_plan_node(state: GraphState) -> Dict[str, Any]:
+        """Execute plan steps using step executor subgraph."""
+        logger.info(f"[EXECUTE_PLAN] Running step executor for {len(state.get('plan', []))} steps")
+        
+        # Create step executor state
+        exec_state = create_executor_initial_state(
+            question=state["original_question"],
+            plan=state.get("plan", []),
+        )
+        
+        # Run step executor
+        result = step_executor.invoke(exec_state)
+        
+        # Extract results
+        step_outputs = result.get("step_outputs", [])
+        retrieved_docs = result.get("retrieved_docs", [])
+        extracted_notes = result.get("extracted_notes", [])
+        sources = []
+        
+        # Collect sources from step outputs
+        for step in step_outputs:
+            if isinstance(step, dict):
+                docs = step.get("docs_used", [])
+                sources.extend(docs)
+        
+        logger.info(f"[EXECUTE_PLAN] Completed with {len(step_outputs)} step outputs")
+        
+        return {
+            "step_outputs": step_outputs,
+            "retrieved_docs": retrieved_docs,
+            "extracted_notes": extracted_notes,
+            "sources": list(set(sources)),  # Deduplicate
+            "reasoning_trace": [{
+                "phase": "EXECUTE_PLAN",
+                "thought": f"Executed {len(step_outputs)} plan steps",
+                "details": f"Retrieved {len(retrieved_docs)} docs, {len(extracted_notes)} notes",
+                "iteration": state.get("iteration_count", 0),
+            }],
+        }
+    
+    def summarize_plan_node(state: GraphState) -> Dict[str, Any]:
+        """Summarize plan execution with plan summarizer."""
+        return plan_summarizer_sync(state)
+    
+    def route_after_plan_enhanced(state: GraphState) -> str:
+        """Route after planning."""
+        if state.get("plan") and len(state["plan"]) > 0:
+            logger.info(f"Plan created with {len(state['plan'])} steps")
+            return "execute_plan"
+        else:
+            logger.warning("No plan created, ending")
+            return "done"
+    
+    def route_after_summary(state: GraphState) -> str:
+        """Route after summarization - check confidence."""
+        confidence = state.get("final_confidence", 0)
+        iteration = state.get("iteration_count", 0)
+        max_iter = state.get("max_iterations", 3)
+        
+        if confidence < 6 and iteration < max_iter:
+            logger.info(f"Low confidence ({confidence}/10), backtracking")
+            return "backtrack"
+        
+        logger.info(f"Confidence sufficient ({confidence}/10)")
+        return "done"
+    
+    # Build enhanced graph
+    graph = StateGraph(GraphState)
+    
+    # Add nodes
+    graph.add_node("plan", plan_node_enhanced)
+    graph.add_node("execute_plan", execute_plan_node)
+    graph.add_node("summarize", summarize_plan_node)
+    graph.add_node("backtrack", backtrack_node)
+    graph.add_node("done", done_node)
+    
+    # Add edges
+    graph.add_edge(START, "plan")
+    graph.add_conditional_edges("plan", route_after_plan_enhanced)
+    graph.add_edge("execute_plan", "summarize")
+    graph.add_conditional_edges("summarize", route_after_summary)
+    graph.add_conditional_edges("backtrack", route_after_backtrack)
+    graph.add_edge("done", END)
+    
+    logger.info("Built enhanced agentic graph with step executor")
+    
+    return graph.compile()
+
+
+def get_enhanced_graph_diagram() -> str:
+    """Get Mermaid diagram for enhanced graph."""
+    return """
+flowchart TB
+    START --> plan["PLAN (PICO)"]
+    plan -->|has plan| execute["STEP EXECUTOR"]
+    plan -->|no plan| done
+    
+    subgraph execute["STEP EXECUTOR (Loop)"]
+        define["task_definer"] --> exec_step{"Task Type?"}
+        exec_step -->|search| search["RAG Search"]
+        exec_step -->|aggregate| agg["Aggregate"]
+        search --> next["next step?"]
+        agg --> next
+        next -->|more steps| define
+        next -->|done| out["outputs"]
+    end
+    
+    execute --> summarize["PLAN SUMMARIZER"]
+    summarize -->|high confidence| done
+    summarize -->|low confidence| backtrack
+    backtrack -->|retry| plan
+    backtrack -->|max tries| done
+    done --> END
+"""
+
