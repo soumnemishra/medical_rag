@@ -262,6 +262,36 @@ def build_agentic_graph(
     return graph.compile()
 
 
+def build_full_agentic_graph() -> StateGraph:
+    """
+    Build the agentic RAG graph with all real agent implementations.
+    
+    This is the recommended way to build the graph for production use.
+    Uses:
+    - PlannerAgent: PICO decomposition + query planning
+    - RetrieverAgent: PubMed search with PICO optimization
+    - ExtractorAgent: Noise filtering from documents
+    - SynthesizerAgent: Medical answer synthesis with confidence
+    
+    Returns:
+        Compiled LangGraph StateGraph with all agents
+    """
+    # Import agent nodes (lazy to avoid circular deps)
+    from src.agents.planner import planner_node_sync
+    from src.agents.retriever import retriever_node_sync
+    from src.agents.extractor import extractor_node_sync
+    from src.agents.synthesizer import synthesizer_node_sync
+    
+    logger.info("Building full agentic graph with all agent implementations")
+    
+    return build_agentic_graph(
+        planner=planner_node_sync,
+        retriever=retriever_node_sync,
+        extractor=extractor_node_sync,
+        synthesizer=synthesizer_node_sync,
+    )
+
+
 # =============================================================================
 # Query Runner
 # =============================================================================
