@@ -91,31 +91,37 @@ class SynthesizerAgent:
         logger.info(f"SynthesizerAgent initialized (use_local={use_local})")
     
     def _get_llm(self) -> Any:
-        """Get or create the LLM instance."""
+        """Get or create the LLM instance with Ollama primary, Gemini fallback."""
         if self.llm is not None:
             return self.llm
         
-        # Synthesis benefits from stronger models
+        # Try Ollama first (local)
         if self.use_local:
             try:
-                from langchain_community.llms import Ollama
-                # Try llama3.1:8b for synthesis if available
-                self.llm = Ollama(
-                    model="llama3.2:3b",  # Fallback to smaller model
+                from langchain_ollama import OllamaLLM
+                self.llm = OllamaLLM(
+                    model="llama3.2:3b",  # Better for synthesis
                     base_url="http://localhost:11434",
                     temperature=0.3,
                 )
+                logger.info("Synthesizer using local Ollama (llama3.2:3b)")
             except Exception as e:
-                logger.warning(f"Ollama failed: {e}, using Gemini")
+                logger.warning(f"Ollama failed: {e}, falling back to Gemini")
                 self.use_local = False
                 return self._get_llm()
         else:
-            from langchain_google_genai import ChatGoogleGenerativeAI
-            self.llm = ChatGoogleGenerativeAI(
-                model="gemini-2.0-flash",
-                temperature=0.3,
-                google_api_key=os.getenv("GOOGLE_API_KEY"),
-            )
+            # Fallback to Gemini
+            try:
+                from langchain_google_genai import ChatGoogleGenerativeAI
+                self.llm = ChatGoogleGenerativeAI(
+                    model="gemini-2.0-flash",
+                    temperature=0.3,
+                    google_api_key=os.getenv("GOOGLE_API_KEY"),
+                )
+                logger.info("Synthesizer using Gemini")
+            except Exception as e:
+                logger.error(f"Gemini also failed: {e}")
+                raise
         
         return self.llm
     
@@ -136,6 +142,44 @@ class SynthesizerAgent:
         
         return "\n\n".join(notes)
     
+    def _extract_confidence(self, response: str) -> int:
+        """Extract confidence score from LLM response."""
+        import re
+        
+        # Look for patterns like "Confidence: 7/10", "confidence score: 8", etc.
+        patterns = [
+            r'[Cc]onfidence[:\s]+(\d+)\s*/\s*10',
+            r'[Cc]onfidence[:\s]+(\d+)',
+            r'(\d+)/10',
+            r'score[:\s]+(\d+)',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, response)
+            if match:
+                score = int(match.group(1))
+                return min(max(score, 0), 10)  # Clamp to 0-10
+        
+        # Default confidence based on response length and presence of PMIDs
+        if 'PMID' in response and len(response) > 200:
+            return 7
+        elif len(response) > 100:
+            return 5
+        return 3
+    
+    def _clean_answer(self, response: str) -> str:
+        """Clean the LLM response for display."""
+        import re
+        
+        # Remove confidence scoring lines at the end
+        response = re.sub(r'\n*[Cc]onfidence[:\s]+\d+.*$', '', response, flags=re.MULTILINE)
+        response = re.sub(r'\n*\d+/10\s*$', '', response, flags=re.MULTILINE)
+        
+        # Clean up extra whitespace
+        response = response.strip()
+        
+        return response
+    
     async def synthesize(self, state: GraphState) -> Dict[str, Any]:
         """
         Synthesize final answer from extracted evidence.
@@ -146,6 +190,9 @@ class SynthesizerAgent:
         Returns:
             State updates with final_answer and confidence
         """
+        from langchain_core.output_parsers import StrOutputParser
+        import re
+        
         question = state["original_question"]
         evidence = self._format_evidence(state)
         iteration = state.get("iteration_count", 0)
@@ -155,29 +202,37 @@ class SynthesizerAgent:
         
         try:
             llm = self._get_llm()
-            chain = self.prompt | llm.with_structured_output(QAAnswer)
             
-            result: QAAnswer = await chain.ainvoke({
+            # Use StrOutputParser for Ollama compatibility
+            chain = self.prompt | llm | StrOutputParser()
+            
+            raw_response = await chain.ainvoke({
                 "question": question,
                 "evidence": evidence,
             })
             
-            logger.info(f"[SYNTHESIZER] Answer generated, confidence={result.confidence}/10")
+            logger.info(f"[SYNTHESIZER] Got response, parsing...")
+            
+            # Parse confidence from response
+            confidence = self._extract_confidence(raw_response)
+            answer = self._clean_answer(raw_response)
+            
+            logger.info(f"[SYNTHESIZER] Answer generated, confidence={confidence}/10")
             
             # Build formatted answer with sources
-            formatted_answer = f"{result.answer}\n\n"
+            formatted_answer = f"{answer}\n\n"
             if sources:
                 formatted_answer += f"**Sources:** {', '.join([f'PMID:{s}' for s in sources[:5]])}\n"
-            formatted_answer += f"\n*Confidence: {result.confidence}/10*"
+            formatted_answer += f"\n*Confidence: {confidence}/10*"
             
             return {
                 "final_answer": formatted_answer,
-                "final_confidence": result.confidence,
+                "final_confidence": confidence,
                 "current_step": AgentStep.DONE,
                 "reasoning_trace": [{
                     "phase": "SYNTHESIZE",
-                    "thought": f"Generated answer with confidence {result.confidence}/10",
-                    "details": result.analysis[:200] if result.analysis else "",
+                    "thought": f"Generated answer with confidence {confidence}/10",
+                    "details": answer[:200],
                     "iteration": iteration,
                 }],
             }
@@ -216,7 +271,7 @@ def get_synthesizer_agent() -> SynthesizerAgent:
     """Get or create the global synthesizer agent."""
     global _synthesizer_agent
     if _synthesizer_agent is None:
-        _synthesizer_agent = SynthesizerAgent(use_local=False)  # Use Gemini
+        _synthesizer_agent = SynthesizerAgent(use_local=True)  # Try Ollama first
     return _synthesizer_agent
 
 

@@ -85,29 +85,35 @@ class ExtractorAgent:
         logger.info(f"ExtractorAgent initialized (max_docs={max_docs_to_extract})")
     
     def _get_llm(self) -> Any:
-        """Get or create the LLM instance."""
+        """Get or create the LLM instance with Ollama primary, Gemini fallback."""
         if self.llm is not None:
             return self.llm
         
         if self.use_local:
             try:
-                from langchain_community.llms import Ollama
-                self.llm = Ollama(
+                from langchain_ollama import OllamaLLM
+                self.llm = OllamaLLM(
                     model="phi4-mini",
                     base_url="http://localhost:11434",
                     temperature=0.1,  # Low temp for extraction
                 )
+                logger.info("Extractor using local Ollama (phi4-mini)")
             except Exception as e:
                 logger.warning(f"Ollama failed: {e}, using Gemini")
                 self.use_local = False
                 return self._get_llm()
         else:
-            from langchain_google_genai import ChatGoogleGenerativeAI
-            self.llm = ChatGoogleGenerativeAI(
-                model="gemini-2.0-flash",
-                temperature=0.1,
-                google_api_key=os.getenv("GOOGLE_API_KEY"),
-            )
+            try:
+                from langchain_google_genai import ChatGoogleGenerativeAI
+                self.llm = ChatGoogleGenerativeAI(
+                    model="gemini-2.0-flash",
+                    temperature=0.1,
+                    google_api_key=os.getenv("GOOGLE_API_KEY"),
+                )
+                logger.info("Extractor using Gemini")
+            except Exception as e:
+                logger.error(f"Gemini also failed: {e}")
+                raise
         
         return self.llm
     

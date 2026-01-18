@@ -53,28 +53,15 @@ class RetrieverAgent:
         logger.info(f"RetrieverAgent initialized (max_results={max_results})")
     
     def _build_pico_query(self, state: GraphState) -> str:
-        """Build an optimized PubMed query from PICO components."""
-        pico_data = state.get("pico_query", {})
+        """
+        Build a PubMed query.
         
-        if not pico_data or not any(pico_data.values()):
-            # Fallback to original question
-            return state["original_question"]
-        
-        # Create PICO query object
-        pico = PICOQuery(
-            population=pico_data.get("population", []),
-            intervention=pico_data.get("intervention", []),
-            modifiers=pico_data.get("modifiers", []),
-            outcome=[],
-            date_range=None,
-            humans_only=True,
-        )
-        
-        # Build optimized query
-        query = self.query_builder.build_query(pico)
-        logger.info(f"Built PICO query: {query[:100]}...")
-        
-        return query
+        For now, uses the original question directly for reliability.
+        PICO optimization can be re-enabled once planner outputs are validated.
+        """
+        question = state["original_question"]
+        logger.info(f"Using simple search with question: {question[:50]}...")
+        return question
     
     def _convert_to_retrieved_doc(self, doc: RetrievedDocument) -> RetrievedDoc:
         """Convert PubMed document to state-compatible format."""

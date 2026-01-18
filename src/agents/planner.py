@@ -100,25 +100,27 @@ class PlannerAgent:
         logger.info(f"PlannerAgent initialized (use_local={use_local})")
     
     def _get_llm(self) -> Any:
-        """Get or create the LLM instance."""
+        """Get or create the LLM instance with Ollama primary, Gemini fallback."""
         if self.llm is not None:
             return self.llm
         
-        # Lazy import to avoid circular dependencies
+        # Try Ollama first (local)
         if self.use_local:
             try:
-                from langchain_community.llms import Ollama
-                self.llm = Ollama(
+                from langchain_ollama import OllamaLLM
+                self.llm = OllamaLLM(
                     model="phi4-mini",
                     base_url="http://localhost:11434",
                     temperature=0.3,
                 )
+                # Test connection
                 logger.info("Using local Ollama (phi4-mini)")
             except Exception as e:
-                logger.warning(f"Failed to connect to Ollama: {e}, falling back to Gemini")
+                logger.warning(f"Ollama failed: {e}, falling back to Gemini")
                 self.use_local = False
                 return self._get_llm()
         else:
+            # Fallback to Gemini
             try:
                 from langchain_google_genai import ChatGoogleGenerativeAI
                 self.llm = ChatGoogleGenerativeAI(
@@ -128,7 +130,7 @@ class PlannerAgent:
                 )
                 logger.info(f"Using Gemini ({settings.GEMINI_MODEL})")
             except Exception as e:
-                logger.error(f"Failed to initialize Gemini: {e}")
+                logger.error(f"Gemini also failed: {e}")
                 raise
         
         return self.llm
@@ -172,6 +174,9 @@ class PlannerAgent:
         Returns:
             Updates to graph state including plan and pico_query
         """
+        from langchain_core.output_parsers import StrOutputParser
+        import re
+        
         question = state["original_question"]
         memory = self._format_memory(state)
         iteration = state.get("iteration_count", 0)
@@ -181,25 +186,31 @@ class PlannerAgent:
         try:
             llm = self._get_llm()
             
-            # Create chain with structured output
-            chain = self.prompt | llm.with_structured_output(PlanOutput)
+            # Use StrOutputParser for Ollama compatibility
+            chain = self.prompt | llm | StrOutputParser()
             
             # Invoke chain
-            result: PlanOutput = await chain.ainvoke({
+            raw_response = await chain.ainvoke({
                 "question": question,
                 "memory": memory,
             })
             
-            logger.info(f"[PLANNER] Created plan with {len(result.steps)} steps")
+            logger.info(f"[PLANNER] Got response, parsing...")
+            
+            # Parse the response to extract steps
+            steps = self._parse_plan_response(raw_response, question)
+            pico = self._parse_pico_from_response(raw_response)
+            
+            logger.info(f"[PLANNER] Created plan with {len(steps)} steps")
             
             return {
-                "plan": result.steps,
-                "pico_query": self._extract_pico_from_plan(result),
+                "plan": steps,
+                "pico_query": pico,
                 "current_step": AgentStep.RETRIEVE,
                 "reasoning_trace": [{
                     "phase": "PLAN",
-                    "thought": f"Decomposed into {len(result.steps)} steps",
-                    "details": result.analysis[:200],
+                    "thought": f"Decomposed into {len(steps)} steps using LLM",
+                    "details": raw_response[:200],
                     "iteration": iteration,
                 }],
             }
@@ -220,6 +231,61 @@ class PlannerAgent:
                     "iteration": iteration,
                 }],
             }
+    
+    def _parse_plan_response(self, response: str, question: str) -> List[str]:
+        """Parse LLM response to extract plan steps."""
+        import re
+        
+        steps = []
+        
+        # Try to find numbered steps (1., 2., etc.)
+        numbered = re.findall(r'\d+\.\s*(.+?)(?=\d+\.|$)', response, re.DOTALL)
+        if numbered:
+            steps = [s.strip().split('\n')[0] for s in numbered if s.strip()]
+        
+        # Try bullet points if no numbered steps
+        if not steps:
+            bullets = re.findall(r'[-•]\s*(.+)', response)
+            steps = [b.strip() for b in bullets if b.strip()]
+        
+        # Fallback: use lines that look like steps
+        if not steps:
+            lines = response.split('\n')
+            for line in lines:
+                line = line.strip()
+                if line and len(line) > 10 and not line.startswith('#'):
+                    steps.append(line)
+                if len(steps) >= 5:
+                    break
+        
+        # Ultimate fallback
+        if not steps:
+            steps = self._create_fallback_plan(question)
+        
+        return steps[:5]  # Max 5 steps
+    
+    def _parse_pico_from_response(self, response: str) -> Dict[str, List[str]]:
+        """Parse PICO components from response."""
+        import re
+        
+        pico = {
+            "population": [],
+            "intervention": [],
+            "modifiers": [],
+        }
+        
+        # Try to extract PICO terms
+        pop_match = re.search(r'[Pp]opulation[:\s]+([^\n]+)', response)
+        if pop_match:
+            terms = [t.strip() for t in pop_match.group(1).split(',')]
+            pico["population"] = [t for t in terms if t and len(t) < 50]
+        
+        int_match = re.search(r'[Ii]ntervention[:\s]+([^\n]+)', response)
+        if int_match:
+            terms = [t.strip() for t in int_match.group(1).split(',')]
+            pico["intervention"] = [t for t in terms if t and len(t) < 50]
+        
+        return pico
     
     def _create_fallback_plan(self, question: str) -> List[str]:
         """Create a simple fallback plan when LLM fails."""
