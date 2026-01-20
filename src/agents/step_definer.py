@@ -1,6 +1,6 @@
 from typing import Dict, Any, List
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import PydanticOutputParser
+from langchain_core.output_parsers import JsonOutputParser
 from src.state.state import PlanExecState, StepTaskFormat, PlanSummaryFormat, PlanSummaryState, StepTaskState
 from src.prompts.templates import (
     STEP_DEFINER_SYSTEM_PROMPT,
@@ -19,20 +19,18 @@ class StepDefinerAgent:
     """
     
     def __init__(self):
-        self.llm = ModelRegistry.get_llm(temperature=0.3)
+        self.llm = ModelRegistry.get_light_llm(temperature=0.0, json_mode=True)
         
-        self.step_parser = PydanticOutputParser(pydantic_object=StepTaskFormat)
-        self.summary_parser = PydanticOutputParser(pydantic_object=PlanSummaryFormat)
+        # Use simple JSON parser
+        self.parser = JsonOutputParser()
         
-        step_sys = STEP_DEFINER_SYSTEM_PROMPT + "\n\nFORMAT INSTRUCTIONS:\n{format_instructions}"
         self.step_prompt = ChatPromptTemplate.from_messages([
-            ("system", step_sys),
+            ("system", STEP_DEFINER_SYSTEM_PROMPT),
             ("human", STEP_DEFINER_HUMAN_PROMPT)
         ])
         
-        summary_sys = SUMMARY_SYSTEM_PROMPT + "\n\nFORMAT INSTRUCTIONS:\n{format_instructions}"
         self.summary_prompt = ChatPromptTemplate.from_messages([
-            ("system", summary_sys),
+            ("system", SUMMARY_SYSTEM_PROMPT),
             ("human", SUMMARY_HUMAN_PROMPT)
         ])
 
@@ -46,12 +44,9 @@ class StepDefinerAgent:
             step_question = state.get("step_question", [])
             original_question = state.get("original_question", "")
             
-            # Check stopping conditions:
-            # 1. All steps in plan executed
-            # 2. Last step explicitly reported "No" success
             should_stop = len(step_output) >= len(plan)
-            if step_output and step_output[-1].get("success", "").lower() == "no":
-                should_stop = True
+            # if step_output and step_output[-1].get("success", "").lower() == "no":
+            #     should_stop = True
                 
             if should_stop:
                 return self._summarize(original_question, plan, step_output, step_question)
@@ -60,7 +55,6 @@ class StepDefinerAgent:
                 
         except Exception as e:
             logger.error(f"Task definition failed: {e}")
-            # Fallback to stop and summarize with error
             return {"stop": True, "plan_summary": {"output": "Failed", "answer": f"Error: {str(e)}", "score": 0}}
 
     def _summarize(self, question: str, plan: List[str], step_outputs: List[Dict], step_questions: List[Dict]) -> Dict[str, Any]:
@@ -75,18 +69,22 @@ class StepDefinerAgent:
             score = output.get("rating", 0)
             
             memory += f"Task: {task_desc}\nDetailed Query: {detailed_q}\nAnswer: {answer}\nConfidence: {score}\n\n"
+        
+        # Debug: Log memory content
+        logger.info(f"Summary Memory (first 500 chars): {memory[:500]}...")
             
-        chain = self.summary_prompt | self.llm | self.summary_parser
+        chain = self.summary_prompt | self.llm | self.parser
         
         result = chain.invoke({
             "question": question,
             "plan": f"[{', '.join(plan)}]",
-            "memory": memory,
-            "format_instructions": self.summary_parser.get_format_instructions()
+            "memory": memory
         })
         
+        # Ensure result matches PlanSummaryState
+        # If parsing is loose, we trust the model produced valid dict
         return {
-            "plan_summary": result.model_dump(), 
+            "plan_summary": result, 
             "stop": True
         }
 
@@ -101,18 +99,16 @@ class StepDefinerAgent:
         for i, output in enumerate(step_outputs):
             memory += f"Task: {plan[i]}\nAnswer: {output.get('answer', '')}\n\n"
             
-        chain = self.step_prompt | self.llm | self.step_parser
+        chain = self.step_prompt | self.llm | self.parser
         
         result = chain.invoke({
             "plan": f"[{', '.join(plan)}]",
             "cur_step": cur_step_desc,
-            "memory": memory,
-            "format_instructions": self.step_parser.get_format_instructions()
+            "memory": memory
         })
         
-        logger.info(f"Defined task: {result.type} - {result.task}")
-        # Need to return dict that matches StepTaskState
-        return {"step_question": [result.model_dump()]}
+        logger.info(f"Defined task: {result.get('type')} - {result.get('task')}")
+        return {"step_question": [result]}
 
 def step_node(state: PlanExecState) -> Dict[str, Any]:
     agent = StepDefinerAgent()

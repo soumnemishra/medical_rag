@@ -1,14 +1,10 @@
-from typing import List, Dict, Any
+from typing import Dict, Any, List
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import JsonOutputParser
 from src.state.state import GraphState, PlanFormat
-from src.prompts.templates import (
-    PLANNING_SYSTEM_PROMPT,
-    PLANNING_HUMAN_PROMPT
-)
+from src.prompts.templates import PLANNING_SYSTEM_PROMPT, PLANNING_HUMAN_PROMPT
 from src.core.registry import ModelRegistry
 import logging
-
-from langchain_core.output_parsers import PydanticOutputParser
 
 logger = logging.getLogger(__name__)
 
@@ -18,14 +14,11 @@ class PlannerAgent:
     """
     
     def __init__(self):
-        self.llm = ModelRegistry.get_llm(temperature=0.3)
-        self.parser = PydanticOutputParser(pydantic_object=PlanFormat)
-        
-        # Inject format instructions into system prompt
-        system_prompt = PLANNING_SYSTEM_PROMPT + "\n\nFORMAT INSTRUCTIONS:\n{format_instructions}"
+        self.llm = ModelRegistry.get_heavy_llm(temperature=0.0, json_mode=True)
+        self.parser = JsonOutputParser()
         
         self.prompt = ChatPromptTemplate.from_messages([
-            ("system", system_prompt),
+            ("system", PLANNING_SYSTEM_PROMPT),
             ("human", PLANNING_HUMAN_PROMPT)
         ])
         
@@ -63,19 +56,18 @@ class PlannerAgent:
             
             result = chain.invoke({
                 "question": question,
-                "memory": memory,
-                "format_instructions": self.parser.get_format_instructions()
+                "memory": memory
             })
             
-            logger.info(f"Generated Plan: {result.step}")
-            return {"plan": result.step}
+            steps = result.get("step", [])
+            logger.info(f"Generated Plan: {steps}")
+            return {"plan": steps}
             
         except Exception as e:
             logger.error(f"Planning failed: {e}")
-            # Fallback for robustness
-            return {"plan": [f"Answer the question: {question}"]}
+            # Fallback
+            return {"plan": [f"Answer the question: {state['original_question']}"]}
 
-# Node entry point
 def planner_node(state: GraphState) -> Dict[str, Any]:
     agent = PlannerAgent()
     return agent.plan(state)

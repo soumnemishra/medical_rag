@@ -51,8 +51,9 @@ Thumbs.db
 *.log
 logs/
 
-# Reference code (MA-RAG)
+# Reference code (MA-RAG, TC-RAG)
 MA-RAG-main/
+TC-RAG-main/
 
 # Data and results
 data/benchmark.json

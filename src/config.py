@@ -64,12 +64,44 @@ class Settings(BaseSettings):
         description="Ollama API base URL"
     )
     OLLAMA_MODEL: str = Field(
+        default="phi4-mini:latest",
+        description="Default Ollama model"
+    )
+    OLLAMA_SMART_MODEL: str = Field(
         default="llama3.2:3b",
-        description="Ollama model to use"
+        description="Smart Ollama model for Planner/QA/Extractor"
+    )
+    OLLAMA_FAST_MODEL: str = Field(
+        default="qwen2.5:1.5b",
+        description="Fast Ollama model for Step Definer"
     )
     USE_OLLAMA: bool = Field(
         default=True,
         description="Use Ollama instead of Gemini"
+    )
+    
+    # Colab Configuration (for hybrid architecture)
+    USE_COLAB: bool = Field(
+        default=False,
+        description="Use Google Colab for heavy compute tasks"
+    )
+    COLAB_API_URL: str = Field(
+        default="",
+        description="ngrok URL from Colab server (e.g., https://xxxx.ngrok-free.app)"
+    )
+    USE_HYBRID: bool = Field(
+        default=False,
+        description="Use Hybrid (Gemini for Heavy, Ollama for Light) agents"
+    )
+    
+    # Retrieval Configuration
+    USE_MEDCPT: bool = Field(
+        default=False,
+        description="Use MedCPT for biomedical retrieval (requires GPU, ~4GB VRAM)"
+    )
+    USE_HYBRID_RETRIEVAL: bool = Field(
+        default=True,
+        description="Use hybrid retrieval (BM25 + Dense with RRF)"
     )
     
     # PubMed Configuration
@@ -88,11 +120,11 @@ class Settings(BaseSettings):
     
     # Retry Configuration
     RETRY_MAX_ATTEMPTS: int = Field(
-        default=3,
+        default=10,
         description="Maximum retry attempts"
     )
     RETRY_WAIT_SECONDS: float = Field(
-        default=1.0,
+        default=4.0,
         description="Initial wait time for backoff"
     )
     

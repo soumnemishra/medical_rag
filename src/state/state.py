@@ -49,7 +49,7 @@ class RagState(TypedDict):
     State for RAG execution on a single query.
     """
     question: str
-    documents: List[str]
+    documents: List[str] # Optional: Pre-fetched docs/notes
     doc_ids: List[str]
     notes: List[str]
     final_raw_answer: QAAnswerFormat
