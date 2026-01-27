@@ -45,16 +45,26 @@ class TextChunker:
     
     def _split_sentences(self, text: str) -> List[str]:
         """Split text into sentences."""
-        # Simple sentence splitting pattern
-        # Handles: . ! ? followed by space or end
-        # Avoids splitting on: Dr. Mr. Mrs. etc.
-        abbreviations = r'(?<!\b[A-Z][a-z]?)(?<!\b[Dd]r)(?<!\b[Mm]r)(?<!\b[Mm]rs)(?<!\b[Mm]s)(?<!\be\.g)(?<!\bi\.e)'
-        pattern = abbreviations + r'[.!?]\s+'
+        try:
+            # Try using nltk's sentence tokenizer if available
+            import nltk
+            try:
+                sentences = nltk.sent_tokenize(text)
+                return [s.strip() for s in sentences if s.strip()]
+            except LookupError:
+                # nltk data not downloaded, use simple approach
+                pass
+        except ImportError:
+            pass
         
-        sentences = re.split(pattern, text)
+        # Simple fallback: split on . ! ? followed by space and capital letter
+        # More robust than complex lookbehinds
+        import re
+        # Split on sentence endings followed by whitespace
+        sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text)
         # Filter empty sentences and strip whitespace
         sentences = [s.strip() for s in sentences if s.strip()]
-        return sentences
+        return sentences if sentences else [text]
     
     def _chunk_by_sentences(self, text: str) -> List[str]:
         """Chunk text using sliding window over sentences."""

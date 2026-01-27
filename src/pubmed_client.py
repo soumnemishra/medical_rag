@@ -15,18 +15,19 @@ Example Usage:
     from src.pubmed_client import PubMedClient
     
     client = PubMedClient()
-    results = client.search("diabetes treatment")
+    results = await client.search("diabetes treatment")
     for doc in results:
         print(doc.pmid, doc.title)
 """
 
 import logging
+import asyncio
+import aiohttp
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import List, Optional, Set
 
-import requests
 from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field, field_validator
 from tenacity import (
@@ -93,6 +94,7 @@ class RetrievedDocument(BaseModel):
     study_types: List[str] = Field(default_factory=list, description="Publication types")
     mesh_terms: List[str] = Field(default_factory=list, description="MeSH terms")
     source: str = Field(default="PubMed", description="Data source")
+    publication_types: List[str] = Field(default_factory=list, description="All publication types found")
     
     @field_validator("abstract")
     @classmethod
@@ -118,13 +120,10 @@ class RetrievedDocument(BaseModel):
             f"PMID: {self.pmid}\n\n"
             f"{self.abstract}\n"
         )
-    ####################### only used in the tests files #################################
-    # def to_citation(self) -> str:
-    #     """Format as citation."""
-    #     authors_str = ", ".join(self.authors[:3])
-    #     if len(self.authors) > 3:
-    #         authors_str += " et al."
-    #     return f"{authors_str}. {self.title}. {self.journal}. {self.year or 'N/A'}. PMID: {self.pmid}"
+
+    def to_citation(self) -> str:
+        """Format document as a citation string."""
+        return f"{self.authors[0] if self.authors else 'Unknown'} et al., '{self.title}' (PMID: {self.pmid})"
 
 
 class SearchMetadata(BaseModel):
@@ -155,6 +154,7 @@ class RawArticle:
     study_types: List[str] = field(default_factory=list)
     mesh_terms: List[str] = field(default_factory=list)
     is_human_study: bool = False
+    publication_types: List[str] = field(default_factory=list)
 
 
 # =============================================================================
@@ -169,6 +169,7 @@ class PubMedClient:
         Query → eSearch (PMIDs) → eFetch (XML) → Parse → Filter → Validate
     
     Features:
+        - Async I/O with aiohttp
         - Separate search and fetch stages
         - Post-retrieval filtering (humans, date, study type)
         - Pydantic validation layer
@@ -202,10 +203,9 @@ class PubMedClient:
         self.filter_humans = filter_humans
         self.filter_recent_years = filter_recent_years
         self.filter_study_types = filter_study_types
-        self._session = requests.Session()
         
         logger.info(
-            "PubMed client initialized",
+            "PubMed client initialized (Async)",
             extra={
                 "max_results": self.max_results,
                 "filter_humans": filter_humans,
@@ -230,7 +230,7 @@ class PubMedClient:
         retry=retry_if_exception_type(TransientError),
         reraise=True,
     )
-    def esearch(self, query: str, max_results: Optional[int] = None) -> tuple[List[str], SearchMetadata]:
+    async def esearch(self, query: str, max_results: Optional[int] = None) -> tuple[List[str], SearchMetadata]:
         """
         Stage 1: Search PubMed and get PMIDs.
         
@@ -247,30 +247,22 @@ class PubMedClient:
         params = self._get_base_params()
         params.update({
             "term": query,
-            "retmax": max_results or self.max_results,
+            "retmax": str(max_results or self.max_results),
             "retmode": "json",
             "sort": "relevance",
         })
         
-        logger.info("eSearch", extra={"query": query[:100]})
+        logger.info(f"eSearch: {query[:200]}", extra={"query": query[:100]})
         
         try:
-            response = self._session.get(
-                self.ESEARCH_URL,
-                params=params,
-                timeout=30
-            )
-            response.raise_for_status()
+
+            # Create a new session for each attempt to avoid closed loop issues
+            async with aiohttp.ClientSession() as session:
+                async with session.get(self.ESEARCH_URL, params=params, timeout=30) as response:
+                    response.raise_for_status()
+                    data = await response.json()
             
-        except requests.exceptions.Timeout as e:
-            raise PubMedAPIError("eSearch timeout", {"query": query}) from e
-        except requests.exceptions.RequestException as e:
-            raise PubMedAPIError(f"eSearch failed: {e}", {"query": query}) from e
-        
-        try:
-            data = response.json()
             result = data.get("esearchresult", {})
-            
             pmids = result.get("idlist", [])
             metadata = SearchMetadata(
                 total_count=int(result.get("count", 0)),
@@ -288,6 +280,10 @@ class PubMedClient:
             
             return pmids, metadata
             
+        except asyncio.TimeoutError as e:
+            raise PubMedAPIError("eSearch timeout", {"query": query}) from e
+        except aiohttp.ClientError as e:
+            raise PubMedAPIError(f"eSearch failed: {e}", {"query": query}) from e
         except (KeyError, ValueError) as e:
             raise PubMedAPIError("Failed to parse eSearch response", {"error": str(e)}) from e
     
@@ -301,7 +297,7 @@ class PubMedClient:
         retry=retry_if_exception_type(TransientError),
         reraise=True,
     )
-    def efetch(self, pmids: List[str]) -> List[RawArticle]:
+    async def efetch(self, pmids: List[str]) -> List[RawArticle]:
         """
         Stage 2: Fetch full article data for PMIDs.
         
@@ -326,24 +322,21 @@ class PubMedClient:
         logger.info("eFetch", extra={"pmid_count": len(pmids)})
         
         try:
-            response = self._session.get(
-                self.EFETCH_URL,
-                params=params,
-                timeout=60
-            )
-            response.raise_for_status()
+            async with aiohttp.ClientSession() as session:
+                async with session.get(self.EFETCH_URL, params=params, timeout=60) as response:
+                    response.raise_for_status()
+                    content = await response.read()
             
-        except requests.exceptions.Timeout as e:
+            # Parse XML
+            articles = self._parse_xml(content)
+            
+            logger.info("eFetch complete", extra={"articles_parsed": len(articles)})
+            return articles
+            
+        except asyncio.TimeoutError as e:
             raise PubMedAPIError("eFetch timeout", {"pmids": pmids[:5]}) from e
-        except requests.exceptions.RequestException as e:
+        except aiohttp.ClientError as e:
             raise PubMedAPIError(f"eFetch failed: {e}", {"pmids": pmids[:5]}) from e
-        
-        # Parse XML
-        articles = self._parse_xml(response.content)
-        
-        logger.info("eFetch complete", extra={"articles_parsed": len(articles)})
-        
-        return articles
     
     # =========================================================================
     # XML Parsing (Using BeautifulSoup)
@@ -396,7 +389,7 @@ class PubMedClient:
                     abstract_parts.append(abs_elem.text.strip())
         abstract = " ".join(abstract_parts)
         
-        # Year
+        # Year - Improved Logic
         year = None
         pub_date = article_elem.find("PubDate")
         if pub_date:
@@ -406,7 +399,16 @@ class PubMedClient:
                     year = int(year_elem.text.strip())
                 except ValueError:
                     pass
-        
+            # Fallback to MedlineDate if Year is missing
+            if year is None:
+                medline_date = pub_date.find("MedlineDate")
+                if medline_date and medline_date.text:
+                    # Extract first 4 digits as year
+                    import re
+                    match = re.search(r'\d{4}', medline_date.text)
+                    if match:
+                        year = int(match.group(0))
+
         # Authors
         authors = []
         for author in article_elem.find_all("Author"):
@@ -435,9 +437,12 @@ class PubMedClient:
         
         # Study Types (Publication Types)
         study_types = []
+        pub_types = []
         for pub_type in article_elem.find_all("PublicationType"):
             if pub_type.text:
-                study_types.append(pub_type.text.strip())
+                pt_text = pub_type.text.strip()
+                study_types.append(pt_text)
+                pub_types.append(pt_text)
         
         # MeSH Terms
         mesh_terms = []
@@ -459,6 +464,7 @@ class PubMedClient:
             study_types=study_types,
             mesh_terms=mesh_terms,
             is_human_study=is_human,
+            publication_types=pub_types
         )
     
     # =========================================================================
@@ -468,17 +474,6 @@ class PubMedClient:
     def filter_articles(self, articles: List[RawArticle]) -> List[RawArticle]:
         """
         Apply post-retrieval filters.
-        
-        Filters applied:
-            1. Humans only (if enabled)
-            2. Recent years (if configured)
-            3. Clinical study types (if enabled)
-        
-        Args:
-            articles: Raw articles to filter.
-        
-        Returns:
-            Filtered list of articles.
         """
         filtered = articles
         initial_count = len(articles)
@@ -520,14 +515,6 @@ class PubMedClient:
     def validate_articles(self, articles: List[RawArticle]) -> List[RetrievedDocument]:
         """
         Validate articles through Pydantic layer.
-        
-        Articles without abstracts or with invalid data are rejected.
-        
-        Args:
-            articles: Raw articles to validate.
-        
-        Returns:
-            List of validated RetrievedDocument objects.
         """
         validated = []
         rejected = 0
@@ -544,6 +531,7 @@ class PubMedClient:
                     doi=article.doi,
                     study_types=article.study_types,
                     mesh_terms=article.mesh_terms,
+                    publication_types=article.publication_types
                 )
                 validated.append(doc)
             except Exception as e:
@@ -564,37 +552,21 @@ class PubMedClient:
     # Main Search Method (Full Pipeline)
     # =========================================================================
     
-    def search(self, query: str, max_results: Optional[int] = None) -> List[RetrievedDocument]:
+    async def search(self, query: str, max_results: Optional[int] = None) -> List[RetrievedDocument]:
         """
-        Execute full 2-stage retrieval pipeline.
-        
-        Pipeline:
-            Query → eSearch → eFetch → Filter → Validate → RetrievedDocuments
-        
-        Args:
-            query: PubMed query string.
-            max_results: Override default max results.
-        
-        Returns:
-            List of validated RetrievedDocument objects.
-        
-        Example:
-            >>> client = PubMedClient()
-            >>> docs = client.search("melanoma treatment")
-            >>> for doc in docs:
-            ...     print(f"PMID:{doc.pmid} - {doc.title}")
+        Execute full 2-stage retrieval pipeline (Async).
         """
-        logger.info("Starting search pipeline", extra={"query": query[:100]})
+        logger.info(f"Starting search pipeline with query: {query[:200]}", extra={"query": query[:100]})
         
         # Stage 1: Search for PMIDs
-        pmids, metadata = self.esearch(query, max_results)
+        pmids, metadata = await self.esearch(query, max_results)
         
         if not pmids:
             logger.info("No PMIDs found", extra={"query": query[:50]})
             return []
         
         # Stage 2: Fetch articles
-        raw_articles = self.efetch(pmids)
+        raw_articles = await self.efetch(pmids)
         
         if not raw_articles:
             logger.warning("No articles fetched", extra={"pmid_count": len(pmids)})
@@ -619,21 +591,18 @@ class PubMedClient:
         
         return validated_docs
     
-    def search_with_metadata(
+    async def search_with_metadata(
         self, query: str, max_results: Optional[int] = None
     ) -> tuple[List[RetrievedDocument], SearchMetadata]:
         """
         Search with metadata about the search.
-        
-        Returns:
-            Tuple of (documents, search metadata).
         """
-        pmids, metadata = self.esearch(query, max_results)
+        pmids, metadata = await self.esearch(query, max_results)
         
         if not pmids:
             return [], metadata
         
-        raw_articles = self.efetch(pmids)
+        raw_articles = await self.efetch(pmids)
         filtered_articles = self.filter_articles(raw_articles)
         validated_docs = self.validate_articles(filtered_articles)
         

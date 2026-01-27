@@ -200,6 +200,7 @@ class TestDatasetDownload:
         mock_response.status_code = 200
         mock_response.json.return_value = SAMPLE_BENCHMARK_DATA
         mock_response.content = json.dumps(SAMPLE_BENCHMARK_DATA).encode()
+        mock_response.text = json.dumps(SAMPLE_BENCHMARK_DATA)
         mock_response.raise_for_status = MagicMock()
         mock_get.return_value = mock_response
         

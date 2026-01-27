@@ -25,6 +25,13 @@ class PlanSummaryFormat(BaseModel):
     answer: str = Field(description="Final answer for the question")
     score: int = Field(description="Confidence score")
 
+class ClinicalIntentFormat(BaseModel):
+    intent: str = Field(description="Primary intent: 'informational', 'diagnostic', 'therapeutic', 'mechanism'")
+    risk_level: str = Field(description="Risk level: 'low', 'medium', 'high'")
+    requires_disclaimer: bool = Field(description="Whether a disclaimer is mandatory")
+    needs_guidelines: bool = Field(description="Whether clinical guidelines are required")
+
+
 # =============================================================================
 # State Definitions (TypedDict)
 # =============================================================================
@@ -44,6 +51,13 @@ class PlanSummaryState(TypedDict):
     answer: str
     score: int
 
+class ClinicalIntentState(TypedDict):
+    intent: str
+    risk_level: str
+    requires_disclaimer: bool
+    needs_guidelines: bool
+
+
 class RagState(TypedDict):
     """
     State for RAG execution on a single query.
@@ -52,7 +66,11 @@ class RagState(TypedDict):
     documents: List[str] # Optional: Pre-fetched docs/notes
     doc_ids: List[str]
     notes: List[str]
-    final_raw_answer: QAAnswerFormat
+    final_raw_answer: QAAnswerState  # Changed from Pydantic to TypedDict
+    intent: str
+    risk_level: str
+    safety_flags: List[str]
+
 
 class PlanExecState(TypedDict):
     """
@@ -66,7 +84,13 @@ class PlanExecState(TypedDict):
     step_docs_ids: Annotated[List[List[str]], operator.add]      # Retrieved Doc IDs per step
     step_notes: Annotated[List[List[str]], operator.add]         # Notes per step
     plan_summary: PlanSummaryState                               # Final summary of this plan
-    stop: bool = False
+    stop: bool  # Note: Default values not supported in TypedDict - must be set explicitly
+    
+    # Clinical Context passed down from GraphState
+    intent: str
+    risk_level: str
+    needs_guidelines: bool
+    requires_disclaimer: bool
 
 class GraphState(TypedDict):
     """
@@ -77,3 +101,9 @@ class GraphState(TypedDict):
     plan: List[str] 
     past_exp: Annotated[List[PlanExecState], operator.add]       # History of past plan executions
     final_answer: str
+    intent: str
+    risk_level: str
+    safety_flags: List[str]
+    requires_disclaimer: bool
+    needs_guidelines: bool
+

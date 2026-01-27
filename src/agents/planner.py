@@ -40,7 +40,7 @@ class PlannerAgent:
             
         return memory_str
 
-    def plan(self, state: GraphState) -> Dict[str, Any]:
+    async def plan(self, state: GraphState) -> Dict[str, Any]:
         """
         Generate a plan based on the original question and past experiences.
         """
@@ -54,12 +54,25 @@ class PlannerAgent:
             # Using the parser in the chain
             chain = self.prompt | self.llm | self.parser
             
-            result = chain.invoke({
+            result = await chain.ainvoke({
                 "question": question,
                 "memory": memory
             })
             
-            steps = result.get("step", [])
+            raw_steps = result.get("step", [])
+            
+            # Normalize steps to List[str] - handle both string and dict formats
+            steps = []
+            for step in raw_steps:
+                if isinstance(step, str):
+                    steps.append(step)
+                elif isinstance(step, dict):
+                    # LLM sometimes returns {'type': 'Search', 'question': '...'} format
+                    step_text = step.get("question") or step.get("task") or step.get("step") or str(step)
+                    steps.append(step_text)
+                else:
+                    steps.append(str(step))
+            
             logger.info(f"Generated Plan: {steps}")
             return {"plan": steps}
             
@@ -68,6 +81,6 @@ class PlannerAgent:
             # Fallback
             return {"plan": [f"Answer the question: {state['original_question']}"]}
 
-def planner_node(state: GraphState) -> Dict[str, Any]:
+async def planner_node(state: GraphState) -> Dict[str, Any]:
     agent = PlannerAgent()
-    return agent.plan(state)
+    return await agent.plan(state)

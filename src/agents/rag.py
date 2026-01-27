@@ -24,7 +24,7 @@ class RagAgent:
             ("human", QA_HUMAN_PROMPT)
         ])
 
-    def query(self, state: RagState) -> Dict[str, Any]:
+    async def query(self, state: RagState) -> Dict[str, Any]:
         """
         Execute RAG pipeline for the given question.
         """
@@ -38,7 +38,7 @@ class RagAgent:
             logger.info("Using provided documents (skipping retrieval)")
         else:
             try:
-                contexts, doc_ids = self.retriever(question)
+                contexts, doc_ids = await self.retriever(question)
             except Exception as e:
                 logger.error(f"Retrieval error: {e}")
                 contexts, doc_ids = [], []
@@ -53,7 +53,7 @@ class RagAgent:
         try:
             chain = self.prompt | self.llm | self.parser
             
-            response = chain.invoke({
+            response = await chain.ainvoke({
                 "context": context_text,
                 "question": question
             })
@@ -86,6 +86,6 @@ class RagAgent:
                 "final_raw_answer": fallback
             }
 
-def rag_node(state: RagState) -> Dict[str, Any]:
+async def rag_node(state: RagState) -> Dict[str, Any]:
     agent = RagAgent()
-    return agent.query(state)
+    return await agent.query(state)

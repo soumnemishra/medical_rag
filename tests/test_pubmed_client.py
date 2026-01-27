@@ -7,7 +7,7 @@ Uses mocked HTTP responses - no real network calls.
 """
 
 import pytest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, AsyncMock, MagicMock
 from datetime import datetime
 
 from src.pubmed_client import (
@@ -144,8 +144,9 @@ def client():
 @pytest.fixture
 def mock_esearch_response():
     """Create mock eSearch response."""
-    response = Mock()
+    response = AsyncMock()
     response.json.return_value = SAMPLE_ESEARCH_RESPONSE
+    response.status = 200
     response.raise_for_status = Mock()
     return response
 
@@ -153,10 +154,26 @@ def mock_esearch_response():
 @pytest.fixture
 def mock_efetch_response():
     """Create mock eFetch response."""
-    response = Mock()
-    response.content = SAMPLE_EFETCH_XML
+    response = AsyncMock()
+    response.read.return_value = SAMPLE_EFETCH_XML
+    response.status = 200
     response.raise_for_status = Mock()
     return response
+
+
+# Helper to mock aiohttp session
+@pytest.fixture
+def mock_aiohttp_session():
+    with patch("src.pubmed_client.aiohttp.ClientSession") as mock_session_cls:
+        # The context manager returned by ClientSession() constructor
+        session_cm = AsyncMock()
+        mock_session_cls.return_value = session_cm
+        
+        # The session object yielded by the context manager
+        session = MagicMock()
+        session_cm.__aenter__.return_value = session
+        
+        yield session
 
 
 # =============================================================================
@@ -166,40 +183,46 @@ def mock_efetch_response():
 class TestESearch:
     """Tests for eSearch (Stage 1)."""
     
-    @patch("src.pubmed_client.requests.Session.get")
-    def test_esearch_returns_pmids(self, mock_get, client, mock_esearch_response):
+    @pytest.mark.asyncio
+    async def test_esearch_returns_pmids(self, client, mock_aiohttp_session, mock_esearch_response):
         """Test that eSearch returns list of PMIDs."""
-        mock_get.return_value = mock_esearch_response
+        # Setup mock return (context manager for get)
+        mock_get_ctx = AsyncMock()
+        mock_get_ctx.__aenter__.return_value = mock_esearch_response
+        mock_aiohttp_session.get.return_value = mock_get_ctx
         
-        pmids, metadata = client.esearch("melanoma treatment")
+        pmids, metadata = await client.esearch("melanoma treatment")
         
         assert len(pmids) == 3
         assert "12345678" in pmids
         assert metadata.total_count == 150
     
-    @patch("src.pubmed_client.requests.Session.get")
-    def test_esearch_empty_results(self, mock_get, client):
+    @pytest.mark.asyncio
+    async def test_esearch_empty_results(self, client, mock_aiohttp_session):
         """Test eSearch with no results."""
-        mock_response = Mock()
+        mock_response = AsyncMock()
         mock_response.json.return_value = {
             "esearchresult": {"count": "0", "idlist": []}
         }
         mock_response.raise_for_status = Mock()
-        mock_get.return_value = mock_response
         
-        pmids, metadata = client.esearch("nonexistent query xyz")
+        mock_get_ctx = AsyncMock()
+        mock_get_ctx.__aenter__.return_value = mock_response
+        mock_aiohttp_session.get.return_value = mock_get_ctx
+        
+        pmids, metadata = await client.esearch("nonexistent query xyz")
         
         assert pmids == []
         assert metadata.total_count == 0
     
-    @patch("src.pubmed_client.requests.Session.get")
-    def test_esearch_timeout_raises_error(self, mock_get, client):
+    @pytest.mark.asyncio
+    async def test_esearch_timeout_raises_error(self, client, mock_aiohttp_session):
         """Test that timeout raises PubMedAPIError."""
-        import requests
-        mock_get.side_effect = requests.exceptions.Timeout()
+        import asyncio
+        mock_aiohttp_session.get.side_effect = asyncio.TimeoutError()
         
         with pytest.raises(PubMedAPIError) as exc_info:
-            client.esearch("test query")
+            await client.esearch("test query")
         
         assert "timeout" in str(exc_info.value).lower()
 
@@ -211,12 +234,14 @@ class TestESearch:
 class TestEFetch:
     """Tests for eFetch (Stage 2)."""
     
-    @patch("src.pubmed_client.requests.Session.get")
-    def test_efetch_parses_articles(self, mock_get, client, mock_efetch_response):
+    @pytest.mark.asyncio
+    async def test_efetch_parses_articles(self, client, mock_aiohttp_session, mock_efetch_response):
         """Test that eFetch parses XML correctly."""
-        mock_get.return_value = mock_efetch_response
+        mock_get_ctx = AsyncMock()
+        mock_get_ctx.__aenter__.return_value = mock_efetch_response
+        mock_aiohttp_session.get.return_value = mock_get_ctx
         
-        articles = client.efetch(["12345678", "87654321"])
+        articles = await client.efetch(["12345678", "87654321"])
         
         assert len(articles) >= 2
         
@@ -226,13 +251,13 @@ class TestEFetch:
         assert len(article1.authors) == 2
         assert article1.is_human_study is True
     
-    @patch("src.pubmed_client.requests.Session.get")
-    def test_efetch_empty_pmids(self, mock_get, client):
+    @pytest.mark.asyncio
+    async def test_efetch_empty_pmids(self, client, mock_aiohttp_session):
         """Test eFetch with empty PMID list."""
-        articles = client.efetch([])
+        articles = await client.efetch([])
         
         assert articles == []
-        mock_get.assert_not_called()
+        mock_aiohttp_session.get.assert_not_called()
 
 
 # =============================================================================
@@ -341,14 +366,24 @@ class TestValidation:
 class TestFullPipeline:
     """Tests for full search pipeline."""
     
-    @patch("src.pubmed_client.requests.Session.get")
-    def test_search_pipeline(
-        self, mock_get, client, mock_esearch_response, mock_efetch_response
+    @pytest.mark.asyncio
+    async def test_search_pipeline(
+        self, client, mock_aiohttp_session, mock_esearch_response, mock_efetch_response
     ):
         """Test complete search pipeline."""
-        mock_get.side_effect = [mock_esearch_response, mock_efetch_response]
+        # Setup mocks for sequential calls
+        # 1. eSearch
+        mock_esearch_ctx = AsyncMock()
+        mock_esearch_ctx.__aenter__.return_value = mock_esearch_response
         
-        results = client.search("melanoma treatment")
+        # 2. eFetch
+        mock_efetch_ctx = AsyncMock()
+        mock_efetch_ctx.__aenter__.return_value = mock_efetch_response
+        
+        # Configure side_effect to return different contexts
+        mock_aiohttp_session.get.side_effect = [mock_esearch_ctx, mock_efetch_ctx]
+        
+        results = await client.search("melanoma treatment")
         
         # Should have validated documents (only human study with abstract)
         assert len(results) >= 1

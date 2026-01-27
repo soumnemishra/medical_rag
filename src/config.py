@@ -148,11 +148,12 @@ def get_settings() -> Settings:
     Returns:
         Settings: Validated settings instance.
     """
-    return Settings()
+    # Bug Fix #9: Return singleton instead of creating new instance
+    return settings
 
 
-# Global settings instance
-settings = get_settings()
+# Global settings instance (singleton)
+settings = Settings()
 
 
 def configure_logging() -> None:

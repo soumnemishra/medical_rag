@@ -13,6 +13,7 @@ google-generativeai>=0.8.0
 
 # HTTP & API
 requests>=2.31.0
+aiohttp>=3.9.0
 tenacity>=8.2.0
 
 # XML Parsing
@@ -37,6 +38,9 @@ pandas>=2.0.0
 
 # Embeddings & Reranking
 sentence-transformers>=2.2.0
+transformers>=4.30.0
+torch>=2.0.0
+numpy>=1.24.0
 
 # Development
 pytest>=7.4.0

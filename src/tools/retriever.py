@@ -19,23 +19,28 @@ PICO = Population, Intervention, Comparison, Outcome
 
 OUTPUT FORMAT (JSON):
 {{
-    "population": ["disease or condition terms"],
-    "intervention": ["treatment, diagnostic, or topic terms"],
+    "population": ["disease or condition terms - include synonyms and MeSH terms"],
+    "intervention": ["treatment, diagnostic, topic, or mechanism terms"],
     "comparison": ["comparator terms if any, else empty list"],
     "outcome": ["outcome terms if any, else empty list"],
-    "modifiers": ["stage, severity, age, etc."]
+    "modifiers": ["stage, severity, age, clinical setting, etc."]
 }}
 
 GUIDELINES:
 - Extract medical/disease terms for population (e.g., "Hirschsprung's Disease", "NSCLC", "melanoma")
-- Extract intervention/topic terms (e.g., "treatment", "diagnosis", "prognosis")
-- Keep terms short and specific for PubMed
-- If a term has synonyms, include them (e.g., "therapy", "treatment")
+- For NEW ONSET conditions, include: ["new onset X", "initial presentation X", "first episode X", "acute X"]
+- For FOLLOW-UP/MONITORING queries, include: ["follow-up", "monitoring", "surveillance", "screening", "assessment"]
+- For MANAGEMENT queries, include: ["management", "treatment", "therapy", "guidelines", "recommendations"]
+- Include SYNONYMS: e.g., for "heart disease" include ["heart disease", "cardiac disease", "cardiovascular disease", "coronary artery disease", "heart failure"]
+- For OCULAR conditions: include ["eye", "ocular", "ophthalmic", specific anatomical terms]
+- For HYPERTENSION: include ["hypertensive emergency", "hypertensive crisis", "severe hypertension", "blood pressure management"]
+- Extract intervention/topic terms (e.g., "treatment", "diagnosis", "prognosis", "pathophysiology", "etiology")
+- Always include at least 3-5 terms per relevant category for comprehensive coverage
 """
 
 PICO_HUMAN_PROMPT = """Query: {query}
 
-Decompose this into PICO components."""
+Decompose this into PICO components. Be thorough - include synonyms, MeSH terms, and related terms for comprehensive PubMed coverage. For edge cases (follow-up, monitoring, new onset), include specific clinical terminology."""
 
 
 # =============================================================================
@@ -120,8 +125,14 @@ class CrossEncoderReranker:
         scored_docs = list(zip(documents, scores))
         scored_docs.sort(key=lambda x: x[1], reverse=True)
         
-        # Log reranking info
-        logger.info(f"Reranked {len(documents)} docs. Top score: {scored_docs[0][1]:.3f}")
+        # Log reranking info with score threshold warning
+        top_score = scored_docs[0][1]
+        logger.info(f"Reranked {len(documents)} docs. Top score: {top_score:.3f}")
+        
+        # Warn if top score is very low (indicates weak relevance)
+        LOW_RELEVANCE_THRESHOLD = -3.0
+        if top_score < LOW_RELEVANCE_THRESHOLD:
+            logger.warning(f"⚠️ LOW RELEVANCE WARNING: Top score {top_score:.3f} is below threshold {LOW_RELEVANCE_THRESHOLD}. Query may need better terms.")
         
         return [doc for doc, score in scored_docs[:top_k]]
 
@@ -141,7 +152,7 @@ class RetrieverTool:
     def __init__(
         self, 
         top_k: int = 10, 
-        initial_pool_size: int = 50,
+        initial_pool_size: int = 75,  # Increased from 50 for better coverage
         use_query_builder: bool = True,
         use_reranker: bool = True,
         use_hybrid: bool = True,
@@ -219,12 +230,14 @@ class RetrieverTool:
                 humans_only=True
             )
             
-            logger.info(f"PICO decomposition: P={pico.population}, I={pico.intervention}")
+            logger.info(f"PICO decomposition for '{query[:50]}': P={pico.population}, I={pico.intervention}, M={pico.modifiers}, O={pico.outcome}")
             return pico
             
         except Exception as e:
             logger.warning(f"PICO decomposition failed: {e}. Falling back to simple query.")
-            return PICOQuery(population=[query], humans_only=True)
+            # Simple keyword extraction as fallback population
+            keywords = [w for w in query.split() if len(w) > 3][:5]
+            return PICOQuery(population=keywords if keywords else [query], humans_only=True)
     
     def _analyze_query_complexity(self, query: str) -> str:
         """
@@ -278,28 +291,36 @@ class RetrieverTool:
         Get dynamic top_k based on query complexity.
         
         Returns:
-            Adjusted top_k value (3-20 range).
+            Adjusted top_k value (8-20 range).
         """
         complexity = self._analyze_query_complexity(query)
         
-        # Map complexity to top_k range
+        # Map complexity to top_k range - INCREASED for more comprehensive answers
         k_map = {
-            'specific': 5,    # Targeted: fewer, high-precision docs
-            'moderate': 10,   # Standard: balanced
-            'broad': 15       # Broad: more docs for comprehensive coverage
+            'specific': 8,    # Targeted: balanced precision with coverage
+            'moderate': 12,   # Standard: good coverage
+            'broad': 20       # Broad: maximum docs for comprehensive coverage
         }
         
         dynamic_k = k_map.get(complexity, self.top_k)
         logger.info(f"Dynamic K selection: complexity={complexity}, top_k={dynamic_k}")
         
         return dynamic_k
+            
+    def _extract_keywords(self, query: str) -> str:
+        """Extract keywords from natural language for broad search."""
+        # Remove common question words
+        stop_words = {'what', 'is', 'the', 'are', 'latest', 'treatment', 'options', 'for', 'recommended', 'should', 'be', 'management', 'choice', 'of', 'in', 'with', 'patient', 'patients', 'current', 'how', 'long', 'term', 'rates'}
+        words = query.lower().replace('?', '').replace(',', '').split()
+        keywords = [w for w in words if w not in stop_words and len(w) > 2]
+        return " ".join(keywords) if keywords else query
 
     
     def _build_optimized_query(self, query: str) -> str:
         """Build a PubMed-optimized query from natural language."""
         pico = self._decompose_to_pico(query)
         optimized_query = self.query_builder.build_query(pico)
-        logger.info(f"Optimized PubMed query: {optimized_query[:100]}...")
+        logger.info(f"Optimized PubMed query constructed: {optimized_query}")
         return optimized_query
     
     def _hybrid_rank(
@@ -346,46 +367,104 @@ class RetrieverTool:
         
         return fused_docs
     
-    def __call__(self, query: str) -> Tuple[List[str], List[str]]:
+    async def __call__(
+        self, 
+        query: str, 
+        requires_guidelines: bool = False,
+        sources: Optional[List[str]] = None
+    ) -> Tuple[List[str], List[str]]:
         """
         Two-stage retrieval: Fetch large pool → Rerank → Return top_k.
-        
-        Args:
-            query: Natural language query.
-        
-        Returns:
-            Tuple[List[str], List[str]]: (List of context strings, List of PMIDs)
+        Supports filtering for guidelines and specific sources.
         """
         try:
             # Determine effective top_k (dynamic or static)
             effective_top_k = self._get_dynamic_k(query) if self.use_dynamic_k else self.top_k
             
-            # Stage 1: Build query and fetch large pool
-            if self.use_query_builder and self.query_builder:
-                search_query = self._build_optimized_query(query)
-            else:
-                search_query = query.strip()
+            # LATENCY OPTIMIZATION: Skip PICO for very simple queries
+            is_simple = len(query.split()) < 5 and not any(term in query.lower() for term in ["treatment", "management", "diagnosis", "dosage", "efficacy"])
             
-            # Fetch initial pool
-            docs = self.client.search(search_query, max_results=self.initial_pool_size)
+            # Stage 1: Build base query
+            if self.use_query_builder and self.query_builder and not is_simple:
+                base_query = self._build_optimized_query(query)
+            else:
+                if is_simple:
+                    logger.info(f"Fast-Path Retrieval: Skipping PICO for simple query: '{query}'")
+                base_query = query.strip()
+                
+            docs = []
+            
+            # Clinical Guideline prioritization (Hard Rule: Guidelines > Papers)
+            if requires_guidelines:
+                guideline_filter = " AND (Practice Guideline[pt] OR Guideline[pt] OR Consensus Development Conference[pt])"
+                guideline_query = base_query + guideline_filter
+                
+                logger.info("Fetching Clinical Guidelines...")
+                guideline_docs = await self.client.search(guideline_query, max_results=10) # Fetch up to 10 guidelines
+                if guideline_docs:
+                    logger.info(f"Found {len(guideline_docs)} guidelines")
+                    docs.extend(guideline_docs)
+            
+            # General Search (balance redundancy if guidelines found)
+            remaining_slots = self.initial_pool_size - len(docs)
+            if remaining_slots > 0:
+                # Add rigorous evidence filter if high risk/sources specified
+                filter_str = ""
+                if sources and "rct" in sources:
+                    filter_str += " AND (Randomized Controlled Trial[pt] OR Meta-Analysis[pt])"
+                
+                general_query = base_query + filter_str
+                general_docs = await self.client.search(general_query, max_results=remaining_slots)
+                docs.extend(general_docs)
+
+            # Deduplicate by PMID
+            unique_docs = []
+            seen_pmids = set()
+            for doc in docs:
+                if doc.pmid not in seen_pmids:
+                    unique_docs.append(doc)
+                    seen_pmids.add(doc.pmid)
+            docs = unique_docs
             
             if not docs:
-                logger.warning(f"No documents found for query: {query[:50]}...")
-                if self.use_query_builder:
-                    logger.info("Trying fallback with raw query...")
-                    docs = self.client.search(query.strip(), max_results=self.initial_pool_size)
-            
+                logger.warning(f"No documents found for optimized query. Trying Broad Strategy...")
+                # Strategy 2: Keywords only (no field tags, no ANDing of modifiers)
+                keywords = self._extract_keywords(query)
+                logger.info(f"Broad Search Query: {keywords}")
+                docs = await self.client.search(keywords, max_results=self.initial_pool_size)
+                
+            if not docs and self.use_query_builder:
+                logger.warning("Still no docs. Trying simplest PICO (Population only)...")
+                # Strategy 3: Population only
+                pico = self._decompose_to_pico(query)
+                if pico.population:
+                    simple_pico_query = " OR ".join([f'"{p}"[tiab]' for p in pico.population[:3]])
+                    logger.info(f"Population-only Query: {simple_pico_query}")
+                    docs = await self.client.search(simple_pico_query, max_results=self.initial_pool_size)
+
+            if not docs:
+                logger.warning(f"Still no docs. Trying Emergency Fallback (AND-joined terms)...")
+                # Strategy 4: AND-joined core terms (Last Resort)
+                words = self._extract_keywords(query).split()
+                if len(words) > 1:
+                    emergency_query = " AND ".join([f'"{w}"[tiab]' for w in words[:4]])
+                    logger.info(f"Emergency Query: {emergency_query}")
+                    docs = await self.client.search(emergency_query, max_results=self.initial_pool_size)
+
             if not docs:
                 return [], []
             
-            logger.info(f"Stage 1: Retrieved {len(docs)} documents from PubMed")
+            logger.info(f"Stage 1: Retrieved {len(docs)} documents total")
             
-            # Stage 2: Hybrid ranking with RRF (if enabled)
+            # Stage 2: Ranking
+            # Note: We want to preserve guideline priority if possible, but reranker might reshuffle
+            # Strategy: Rerank everything, but maybe boost guidelines? 
+            # For now, let the semantic reranker decide relevance, assuming guidelines are relevant.
+            
             if self.use_hybrid and self.dense_retriever and len(docs) > 1:
                 docs = self._hybrid_rank(query, docs)
-                docs = docs[:effective_top_k]  # Apply dynamic K
+                docs = docs[:effective_top_k]
                 logger.info(f"Stage 2: Hybrid ranked to top {len(docs)} documents")
-            # Stage 2b: Rerank (if hybrid not used)
             elif self.use_reranker and self.reranker and len(docs) > effective_top_k:
                 docs = self.reranker.rerank(query, docs, top_k=effective_top_k)
                 logger.info(f"Stage 2: Reranked to top {len(docs)} documents")
@@ -397,7 +476,9 @@ class RetrieverTool:
             list_doc_ids = []
             
             for doc in docs:
-                context = f"Title: {doc.title}\nAbstract: {doc.abstract}\nDate: {doc.year}"
+                # Add type indicator to context
+                doc_type = " [GUIDELINE]" if "Guideline" in (doc.publication_types or []) else ""
+                context = f"Title: {doc.title}{doc_type}\nAbstract: {doc.abstract}\nDate: {doc.year}"
                 list_docs.append(context)
                 list_doc_ids.append(doc.pmid)
             

@@ -3,14 +3,15 @@
 Streamlit Chat Application for Medical RAG Chatbot.
 
 A chat-based interface for medical doctors to query medical literature
-using real-time PubMed search powered by Pydantic AI and Gemini.
+using real-time PubMed search. Supports both Ollama (local) and Gemini (API) models.
 
 Run with:
     streamlit run app.py
 
 Environment Variables:
-    GOOGLE_CLOUD_PROJECT: GCP project ID
-    GEMINI_MODEL: Gemini model name (default: gemini-2.0-flash)
+    USE_OLLAMA: Set to True for local Ollama models (default: True)
+    OLLAMA_SMART_MODEL: Ollama model name for heavy tasks
+    GEMINI_MODEL: Gemini model name if using API
     PUBMED_API_KEY: Optional NCBI API key
 """
 
@@ -37,11 +38,23 @@ logger = logging.getLogger(__name__)
 def run_async(coro):
     """Run async coroutine in Streamlit-compatible way."""
     try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        if loop.is_closed():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+        return loop.run_until_complete(coro)
+    except Exception as e:
+        # Fallback if loop is messed up
+        logger.error(f"Async loop error: {e}. Creating fresh loop.")
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-    return loop.run_until_complete(coro)
+        return loop.run_until_complete(coro)
 
 
 def make_pmids_clickable(text: str) -> str:
@@ -233,8 +246,12 @@ def render_sidebar() -> None:
     with st.sidebar:
         st.markdown("## ⚙️ Settings")
         
-        # Model info
-        st.markdown(f"**Model:** `{settings.GEMINI_MODEL}`")
+        # Model info - show correct model based on configuration
+        if settings.USE_OLLAMA:
+            model_display = f"`{settings.OLLAMA_SMART_MODEL}` (Ollama)"
+        else:
+            model_display = f"`{settings.GEMINI_MODEL}` (Gemini)"
+        st.markdown(f"**Model:** {model_display}")
         st.markdown(f"**Max Results:** `{settings.MAX_SEARCH_RESULTS}`")
         
         st.markdown("---")
@@ -328,7 +345,7 @@ def render_thinking_process(reasoning_steps: list) -> None:
             """, unsafe_allow_html=True)
 
 
-async def process_query(query: str) -> tuple[str, list, list]:
+async def process_query(query: str) -> tuple[str, list, list, dict]:
     """
     Process a user query through the medical agent.
     
@@ -336,29 +353,61 @@ async def process_query(query: str) -> tuple[str, list, list]:
         query: User's medical question.
     
     Returns:
-        Tuple of (response string, query_log list, reasoning_steps list).
+        Tuple of (response string, query_log list, reasoning_steps list, risk_metadata dict).
     """
     if st.session_state.agent is None:
-        return "❌ Agent not initialized. Please check your configuration.", [], []
+        return "❌ Agent not initialized. Please check your configuration.", [], [], {"risk_level": "unknown"}
     
     try:
-        response, query_log, reasoning_steps = await st.session_state.agent.chat(
+        response, query_log, reasoning_steps, risk_metadata = await st.session_state.agent.chat(
             query,
             history=st.session_state.messages,
         )
-        return response, query_log, reasoning_steps
+        return response, query_log, reasoning_steps, risk_metadata
         
     except TransientError as e:
         logger.warning(f"Transient error: {e}")
-        return f"⚠️ Temporary error occurred. Please try again.\n\nDetails: {e.message}", [], []
+        return f"⚠️ Temporary error occurred. Please try again.\n\nDetails: {e.message}", [], [], {"risk_level": "unknown"}
         
     except PermanentError as e:
         logger.error(f"Permanent error: {e}")
-        return f"❌ An error occurred: {e.message}", [], []
+        return f"❌ An error occurred: {e.message}", [], [], {"risk_level": "unknown"}
         
     except Exception as e:
         logger.exception(f"Unexpected error: {e}")
-        return f"❌ Unexpected error: {str(e)}", [], []
+        return f"❌ Unexpected error: {str(e)}", [], [], {"risk_level": "unknown"}
+
+
+def render_risk_badge(risk_metadata: dict) -> None:
+    """
+    Render a visual risk indicator badge based on the query's risk level.
+    
+    Args:
+        risk_metadata: Dictionary containing risk_level, intent, etc.
+    """
+    risk_level = risk_metadata.get("risk_level", "unknown").lower()
+    intent = risk_metadata.get("intent", "unknown")
+    
+    # Define badge styles
+    badge_config = {
+        "low": {"emoji": "🟢", "color": "#22c55e", "bg": "#052e16", "label": "Low Risk"},
+        "medium": {"emoji": "🟡", "color": "#eab308", "bg": "#422006", "label": "Medium Risk"},
+        "high": {"emoji": "🔴", "color": "#ef4444", "bg": "#450a0a", "label": "High Risk"},
+        "unknown": {"emoji": "⚪", "color": "#94a3b8", "bg": "#1e293b", "label": "Unknown"}
+    }
+    
+    config = badge_config.get(risk_level, badge_config["unknown"])
+    
+    st.markdown(f"""
+    <div style="display: inline-flex; align-items: center; gap: 8px; 
+                padding: 6px 12px; border-radius: 20px; 
+                background: {config['bg']}; border: 1px solid {config['color']}; 
+                margin-bottom: 10px;">
+        <span style="font-size: 1.1em;">{config['emoji']}</span>
+        <span style="color: {config['color']}; font-weight: 600; font-size: 0.85em;">{config['label']}</span>
+        <span style="color: #64748b; font-size: 0.75em;">• {intent.title()}</span>
+    </div>
+    """, unsafe_allow_html=True)
 
 
 def main() -> None:
@@ -404,7 +453,10 @@ def main() -> None:
         # Process query and get response
         with st.chat_message("assistant"):
             with st.spinner("🔍 Searching PubMed and generating response..."):
-                response, query_log, reasoning_steps = run_async(process_query(prompt))
+                response, query_log, reasoning_steps, risk_metadata = run_async(process_query(prompt))
+                
+                # Display risk indicator badge
+                render_risk_badge(risk_metadata)
                 
                 # Display Chain of Thought reasoning process
                 if reasoning_steps:

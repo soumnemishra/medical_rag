@@ -464,7 +464,7 @@ class PubMedQueryBuilder:
         disease_lower = disease.lower().strip()
         return DISEASE_MESH_MAP.get(disease_lower)
 
-''' 
+
 # =============================================================================
 # LLM-based PICO Decomposition Schema
 # =============================================================================
@@ -565,4 +565,3 @@ def build_simple_query(
     
     builder = PubMedQueryBuilder()
     return builder.build_query(pico)
-'''

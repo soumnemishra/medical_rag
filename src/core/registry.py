@@ -19,7 +19,7 @@ class ModelRegistry:
         return ChatOpenAI(
             base_url=f"{settings.COLAB_API_URL}/v1",
             api_key="not-needed",  # Colab server doesn't require auth
-            model="llama-3.2-3b",  # Model name (informational)
+            model=settings.OLLAMA_SMART_MODEL,  # Bug Fix #14: Use settings instead of hardcoded
             temperature=temperature,
             max_tokens=512
         )
@@ -93,4 +93,9 @@ class ModelRegistry:
     def get_heavy_llm(temperature: float = 0.0, json_mode: bool = False):
         """Alias for get_smart_llm."""
         return ModelRegistry.get_smart_llm(temperature, json_mode)
+
+    @staticmethod
+    def get_flash_llm(temperature: float = 0.0, json_mode: bool = False):
+        """Alias for get_fast_llm."""
+        return ModelRegistry.get_fast_llm(temperature, json_mode)
 
