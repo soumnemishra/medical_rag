@@ -96,6 +96,14 @@ class StepDefinerAgent:
         # Add collected PMIDs to result for citation in app
         if isinstance(result, dict):
             result["cited_pmids"] = list(all_pmids)
+            
+            # Bug Fix #9: Programmatically append Final Answer tag if present in JSON
+            # This handles cases where LLM fails to put it in the text body
+            final_decision = result.get("final_decision")
+            if final_decision and final_decision.lower() in ["yes", "no", "maybe"]:
+                logger.info(f"Appending Final Decision to answer: {final_decision}")
+                if "**Final Answer:" not in result.get("answer", ""):
+                    result["answer"] += f"\n\n**Final Answer: {final_decision.lower()}**"
         
         # Ensure result matches PlanSummaryState
         # If parsing is loose, we trust the model produced valid dict

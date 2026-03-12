@@ -81,6 +81,10 @@ class PlannerAgent:
             # Fallback
             return {"plan": [f"Answer the question: {state['original_question']}"]}
 
+
+from src.agents.registry import AgentRegistry
+
 async def planner_node(state: GraphState) -> Dict[str, Any]:
-    agent = PlannerAgent()
+    agent = AgentRegistry.get_instance().planner
     return await agent.plan(state)
+

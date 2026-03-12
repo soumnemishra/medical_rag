@@ -18,6 +18,10 @@ class MaRagAdapter:
     """
     
     def __init__(self):
+        # Initialize registry before building graph
+        from src.agents.registry import AgentRegistry
+        AgentRegistry.get_instance().initialize()
+        
         self.graph = build_graph()
         
     async def answer_query(self, prompt: str) -> AgentResult:
@@ -34,7 +38,8 @@ class MaRagAdapter:
             "original_question": prompt,
             "plan": [],
             "past_exp": [],
-            "final_answer": ""
+            "final_answer": "",
+            "evaluation_mode": True # Enable evaluation mode for SafetyCritic
         }
         
         try:

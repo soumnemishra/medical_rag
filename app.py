@@ -415,6 +415,10 @@ def main() -> None:
     # Initialize session state
     init_session_state()
     
+    # Initialize Agent Registry (One-time setup)
+    from src.agents.registry import AgentRegistry
+    AgentRegistry.get_instance().initialize()
+    
     # Render sidebar
     render_sidebar()
     

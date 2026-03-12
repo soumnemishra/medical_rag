@@ -11,12 +11,18 @@ Example Usage:
     print(settings.GEMINI_MODEL)
     print(settings.PUBMED_BASE_URL)
 """
+'''ths is the centralized configuration of the entire project file '''
+
 
 import os
 import logging
 from typing import Optional
 from pydantic import Field
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings  # this comes from pydantic settings system
+'''it cutomatically loads value from 
+1. Enviroment variables
+2..env file
+3.default values'''
 
 logger = logging.getLogger(__name__)
 

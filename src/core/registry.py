@@ -1,16 +1,31 @@
+# this is the model abstraction layer or model registry pattern 
+
+# this file contains the information which descide which model/llm to 
+# use based on enviroment 
+
+#this place manages our model registry 
+
+
+
+
+
+
+
+
+
 from src.config import settings
 
 class ModelRegistry:
-    """
-    Central registry for LLM instances.
-    Supports: Colab (remote GPU), Ollama (local), and Gemini (API).
-    """
+    # """
+    # Central registry for LLM instances.
+    # Supports: Colab (remote GPU), Ollama (local), and Gemini (API).
+    # """
     
     @staticmethod
     def get_llm(temperature: float = 0.0, json_mode: bool = False):
         """Standard/Legacy accessor - proxies to Smart LLM."""
         return ModelRegistry.get_smart_llm(temperature, json_mode)
-
+# if we use collab parrt this part of the code supports that 
     @staticmethod
     def _get_colab_llm(temperature: float = 0.0, json_mode: bool = False):
         """Get LLM from Colab server (OpenAI-compatible API)."""
@@ -47,7 +62,9 @@ class ModelRegistry:
                 model=settings.OLLAMA_SMART_MODEL,
                 temperature=temperature,
                 keep_alive="5m",
-                format="json" if json_mode else None
+                format="json" if json_mode else None,
+                num_ctx=4096,  # Limit context size to prevent OOM
+                request_timeout=120  # Prevent indefinite hanging
             )
         
         # Option 3: Use Gemini (API)
@@ -78,7 +95,9 @@ class ModelRegistry:
                 model=settings.OLLAMA_FAST_MODEL,
                 temperature=temperature,
                 keep_alive="5m",
-                format="json" if json_mode else None
+                format="json" if json_mode else None,
+                num_ctx=4096,  # Limit context size to prevent OOM
+                request_timeout=120  # Prevent indefinite hanging
             )
         else:
             # Fallback to Smart if Ollama not available

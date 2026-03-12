@@ -3,36 +3,30 @@
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# 1. Planning Prompts
+# 1. Planning Prompts (MA-RAG Paper A.7.1)
 # -----------------------------------------------------------------------------
 
-PLANNING_SYSTEM_PROMPT = """You are a strategic planning assistant for medical question answering. 
-Your goal is to deconstruct a complex query into a sequence of simpler, manageable sub-tasks.
+PLANNING_SYSTEM_PROMPT = """You are tasked with assisting users in generating structured plans for answering questions. Your goal is to deconstruct a query into manageable, simpler components.
 
-GUIDELINES:
-1. SIMPLE QUESTIONS: If the query is a simple definition or basic anatomy/physiology question (e.g., "What is the heart?", "Define hypertension"), output a SINGLE STEP plan. Do NOT overcomplicate simple queries.
-2. ANALYSIS: Identify core components and context of the question.
-3. BREAKDOWN: For complex queries ONLY, deconstruct into a logical sequence of sub-questions.
-4. CONTEXT: Use past experience (if provided) to avoid previous mistakes.
-5. ATOMICITY: Each step should be a specific question to search or an aggregation step.
-6. NO ANSWERING: Do not answer the question yourself in the plan; only plan the steps.
+For each question, perform these tasks:
+
+**Analysis**: Identify the core components of the question, emphasizing the key elements and context needed for a comprehensive understanding. Determine whether the question is straightforward or requires multiple steps.
+
+**Plan Creation**:
+- Break down the question into smaller, simpler questions that lead to the final answer.
+- Ensure those steps are non-overlapping.
+- Each step is clear and logically sequenced.
+- Each step is a question to search, or to aggregate output from previous steps.
 
 OUTPUT FORMAT (JSON):
 {{
     "analysis": "Reasoning for the plan",
-    "step": [
-        "What is the efficacy of Drug A for hypertension?",
-        "What is the efficacy of Drug B for hypertension?",
-        "Compare the efficacy results of Drug A and Drug B."
-    ]
+    "step": ["Sub-question 1", "Sub-question 2", "Final aggregation step if needed"]
 }}
 
-EXAMPLE FOR SIMPLE QUERY:
-Question: "What is the heart?"
-{{
-    "analysis": "This is a simple anatomical definition. A single retrieval step is sufficient.",
-    "step": ["What is the heart?"]
-}}
+NOTES:
+- For simple questions (definitions, basic facts), output a SINGLE step.
+- Do not answer the question yourself; only plan the steps.
 """
 
 PLANNING_HUMAN_PROMPT = """
@@ -43,23 +37,22 @@ Past Experience:
 """
 
 # -----------------------------------------------------------------------------
-# 2. Step Definition Prompts
+# 2. Step Definition Prompts (MA-RAG Paper A.7.2)
 # -----------------------------------------------------------------------------
 
-STEP_DEFINER_SYSTEM_PROMPT = """Given a plan and the current step, output the task for execution.
+STEP_DEFINER_SYSTEM_PROMPT = """Given a plan, the current step, and the results from finished steps, decide the task for this step.
 
-CRITICAL: The "task" field MUST be the EXACT text of the current step from the plan. Do NOT modify it.
+Output the type of task and the query. The query needs to be in detail, include all information from previous step's results in the query if it matters, especially for aggregate tasks. Be concise.
 
 OUTPUT FORMAT (JSON):
 {{
     "type": "question-answering",
-    "task": "<copy the current step text here exactly>"
+    "task": "The detailed query for this step"
 }}
 
 RULES:
-1. Copy the current step EXACTLY as provided - do not paraphrase or summarize.
-2. Set type to "aggregate" ONLY if the step contains words like "compare", "combine", or "summarize".
-3. For all other steps, set type to "question-answering".
+- Set type to "aggregate" if the step requires combining/comparing previous results.
+- Otherwise, set type to "question-answering".
 """
 
 STEP_DEFINER_HUMAN_PROMPT = """
@@ -70,76 +63,66 @@ Results of Finished Steps:
 """
 
 # -----------------------------------------------------------------------------
-# 3. Extractor Prompts
+# 3. Extractor Prompts (MA-RAG Paper A.7.3)
 # -----------------------------------------------------------------------------
 
-EXTRACTOR_SYSTEM_PROMPT = """You are an expert medical evidence extractor. Your goal is to extract and rate specific facts from documents.
+EXTRACTOR_SYSTEM_PROMPT = """Summarize and extract all relevant information from the provided passages based on the given question. Remove all irrelevant information. Think step-by-step.
 
-INPUTS:
-- Question: The specific query you need to answer.
-- Documents: A list of retrieved text chunks.
+**Identify Key Elements**: Read the question carefully to determine what specific information is being requested.
 
-TASK:
-1. Read each document carefully.
-2. Extract sentences, facts, or context that are relevant to the Question.
-3. For each extracted fact, rate its evidence strength (HIGH/MEDIUM/LOW).
-4. If a document has tangential but potentially useful context, extract it with LOW strength.
-5. Provide as much relevant detail as possible.
+**Analyze Passages**: Review the passages thoroughly to find any segments that contain information relevant to the question.
+
+**Extract Relevant Information**: Highlight or note down sentences, phrases, or words from the passages that relate to the question.
+
+**Remove Irrelevant Details**: Ensure that all extracted information is relevant to the question, eliminating unnecessary or unrelated content.
 
 OUTPUT FORMAT (JSON):
 {{
-    "analysis": "Brief reasoning",
+    "analysis": "Brief reasoning about what was found",
     "extracted_notes": [
-        {{"fact": "Extracted finding", "strength": "HIGH/MEDIUM/LOW", "source": "Source"}}
-    ],
-    "overall_confidence": "HIGH/MEDIUM/LOW/NONE",
-    "confidence_reason": "Reason"
+        {{"fact": "Relevant information from the passage", "source": "Source identifier"}}
+    ]
 }}
 
-GUIDELINES:
-- Prefer extracting too much over too little.
-- If the exact answer isn't found, extract related background info.
-- Set overall_confidence to LOW if only tangential info is found, but still extract it.
+NOTES:
+- Avoid any irrelevant details.
+- If a piece of information is mentioned in multiple places, include it only once.
+- If there is no related information, output: {{"analysis": "No related information", "extracted_notes": []}}
 """
 
 EXTRACTOR_HUMAN_PROMPT = """
-Question: {question}
+Query: {question}
 
-Documents:
+Passage:
 {documents}
 """
 
 # -----------------------------------------------------------------------------
-# 3. RAG/QA Prompts
+# 4. RAG/QA Prompts (MA-RAG Paper A.7.4)
 # -----------------------------------------------------------------------------
 
-QA_SYSTEM_PROMPT = """You are a knowledgeable medical assistant. Answer the question thoroughly based on the provided context.
+QA_SYSTEM_PROMPT = """You are an assistant for question-answering tasks. Use the following process to deliver concise and precise answers based on the retrieved context.
+
+**CRITICAL FOR YES/NO/MAYBE QUESTIONS**: If the question asks whether something is true, false, or requires a yes/no/maybe answer, you MUST end your response with exactly: **Final Answer: yes**, **Final Answer: no**, or **Final Answer: maybe**
 
 PROCESS:
-1. Read the context carefully and extract ALL relevant information.
-2. Synthesize a COMPREHENSIVE answer that covers the topic broadly.
-3. Include definitions, types, causes, symptoms, treatments, or other relevant aspects.
-4. If the context contains ANY relevant information, set success to "Yes".
-5. Only set success to "No" if the context is completely empty or entirely unrelated.
+1. **Analyze Carefully**: Begin by thoroughly analyzing both the question and the provided context.
+2. **Identify Core Details**: Focus on identifying the essential names, terms, or details that directly answer the question. Disregard any irrelevant information.
+3. **Provide a Concise Answer**: Remove redundant words and extraneous details. Present the answer by listing only the necessary names, terms, or brief facts.
+4. **Clarity and Accuracy**: Ensure that your answer is clear and maintains the original meaning of the information provided.
+5. **Consensus**: If the contexts are not in consensus, pick the one which is most logical, consistent, or confident.
 
 OUTPUT FORMAT (JSON):
 {{
     "analysis": "Summary of key findings from the context",
-    "answer": "A comprehensive, detailed answer that explains the topic fully using all available information",
+    "answer": "Your clear, concise answer here. For yes/no/maybe questions, end with **Final Answer: yes/no/maybe**",
     "success": "Yes",
     "rating": 7
 }}
-
-IMPORTANT:
-- Be thorough and educational in your answers. Aim for at least 3-4 paragraphs of detailed explanation.
-- Include relevant background information.
-- If the context covers only one aspect, explain that aspect fully.
-- Use medical terminology but also explain concepts clearly.
-- Always try to synthesize multiple facts into a coherent narrative.
 """
 
 QA_HUMAN_PROMPT = """
-Retrieved Context:
+Retrieved information:
 {context}
 
 Question: {question}
@@ -169,10 +152,12 @@ OUTPUT FORMAT (JSON):
 AGGREGATE_HUMAN_PROMPT = """{question}"""
 
 # -----------------------------------------------------------------------------
-# 5. Summarization Prompts
+# 6. Summarization Prompts
 # -----------------------------------------------------------------------------
 
-SUMMARY_SYSTEM_PROMPT = """You are a medical expert. Synthesize all gathered information into a comprehensive, educational final answer WITH CITATIONS.
+SUMMARY_SYSTEM_PROMPT = """**CRITICAL FOR YES/NO/MAYBE QUESTIONS**: If the question asks whether something is true/false or requires a yes/no/maybe answer, you MUST provide your final decision in the `final_decision` field.
+
+You are a medical expert. Synthesize all gathered information into a comprehensive final answer WITH CITATIONS.
 
 INPUT:
 - Original Question
@@ -182,25 +167,20 @@ INPUT:
 YOUR TASK:
 1. Review ALL step outputs and extract every piece of useful information.
 2. Combine and organize the information into a well-structured answer.
-3. Cover multiple aspects: definition, types, causes, symptoms, treatments, etc. if applicable.
-4. CITE PMIDs: When mentioning specific facts or findings, include the PMID reference, e.g., (PMID:12345678).
-5. If ANY step produced useful information, mark as "Successful".
-6. Only mark "Unsuccessful" if NO steps provided any relevant information at all.
+3. CITE PMIDs when mentioning specific facts, e.g., (PMID:12345678).
+4. If ANY step produced useful information, mark as "Successful".
 
 OUTPUT FORMAT (JSON):
 {{
     "output": "Successful",
-    "answer": "Your comprehensive answer here. Start with a topic header like **Hypertension Management** then provide detailed explanation with PMID citations inline such as (PMID:12345678). The answer should be at least 500-1000 words if sufficient information exists. End with a **References** section listing all PMIDs.",
+    "answer": "Your comprehensive answer here with PMID citations.",
+    "final_decision": "yes/no/maybe (or null if not applicable)",
     "score": 8
 }}
 
-CRITICAL INSTRUCTIONS:
-- DO NOT use placeholder text like [Topic] or [Explanation]. Write the ACTUAL answer content.
-- Provide COMPREHENSIVE, EDUCATIONAL answers based on the step outputs.
-- CITE PMIDs: You MUST include (PMID:xxxxxxxx) for EVERY factual claim. Failure to provide citations is unacceptable.
-- Structure your answer with clear markdown headers.
-- Include a **References** section at the end listing all cited PMIDs.
-- If no PMIDs are available, state 'No formal PubMed citations found for this specific point' rather than making them up.
+NOTES:
+- If evidence is mixed or inconclusive, choose "maybe".
+- The `final_decision` field IS MANDATORY for yes/no/maybe questions.
 """
 
 SUMMARY_HUMAN_PROMPT = """
@@ -210,7 +190,7 @@ Plan: {plan}
 Step Outputs (with Source PMIDs):
 {memory}
 
-Synthesize ALL the above information into a comprehensive answer. CITE PMIDs when referencing specific findings. Include a References section.
+Synthesize the above information into a comprehensive answer. CITE PMIDs when referencing specific findings.
 """
 
 # -----------------------------------------------------------------------------
@@ -308,6 +288,7 @@ CHECKLIST:
 4. Hallucination Check: Does it seem to invent facts not supported by evident citations? (General check)
 5. Contraindications: If mentioning drugs, does it mention risks/side effects?
 6. Citation Preservation: If the original answer has citations like (PMID:12345678), you MUST PRESERVE them in your refined answer. DO NOT strip references.
+7. Final Answer Tag: If the answer ends with **Final Answer: yes/no/maybe**, you MUST PRESERVE this tag exactly as is in your refined answer.
 
 OUTPUT FORMAT (JSON):
 {{
@@ -318,3 +299,39 @@ OUTPUT FORMAT (JSON):
 """
 
 SAFETY_CRITIC_HUMAN_PROMPT = """Draft Answer: {answer}"""
+
+
+# -----------------------------------------------------------------------------
+# 9. Evidence Polarity Prompts
+# -----------------------------------------------------------------------------
+
+EVIDENCE_POLARITY_SYSTEM_PROMPT = """You are a Scientific Evidence Analyst.
+Your Task: Determine the directional polarity of the provided evidence with respect to the Question.
+
+INPUTS:
+1. Question
+2. Evidence List (abstracts, summaries, or snippets)
+
+RULES:
+1. **Prioritize Primary Text**: Trust raw abstract text (especially those with PMIDs) over LLM-generated summaries or notes if both are present.
+2. **Refine Confidence**:
+   - **High (0.8-1.0)**: Strong, unambiguous agreement across multiple sources.
+   - **Medium (0.5-0.7)**: Majority agreement but some noise or single source.
+   - **Low (0.0-0.4)**: Sparse, weak, or unclear evidence.
+   - **Score Penalty**: If evidence consists ONLY of summaries/conclusions without raw text, cap confidence at 0.7.
+3. **Ignore Generated Context**: Ignore any generated answers or conclusions in the input notes; evaluate ONLY the relationship between the question and the retrieved evidence text.
+4. **No Default to Mixed**: ONLY return "mixed" if there is clear, direct conflict between valid sources (e.g., Study A says Yes, Study B says No). If evidence is just vague or unrelated, use "insufficient".
+
+OUTPUT FORMAT (JSON):
+{{
+  "polarity": "support" | "refute" | "mixed" | "insufficient",
+  "confidence": 0.0
+}}
+"""
+
+EVIDENCE_POLARITY_HUMAN_PROMPT = """
+Question: {question}
+
+Evidence:
+{evidence}
+"""

@@ -62,6 +62,7 @@ from src.core.registry import ModelRegistry
 from src.agents.step_definer import StepDefinerAgent
 from src.agents.rag import RagAgent#rag agent answers the question using filtered noise 
 from src.agents.extractor import ExtractorAgent # Extractor → removes noise
+from src.agents.registry import AgentRegistry
 from src.tools.retriever import RetrieverTool
 
 logger = logging.getLogger(__name__)
@@ -73,9 +74,10 @@ def build_executor_graph():
     """
     
     # 1. Initialize Agents
-    step_definer = StepDefinerAgent()
-    rag_agent = RagAgent()
-    extractor_agent = ExtractorAgent()
+    registry = AgentRegistry.get_instance()
+    step_definer = registry.step_definer
+    rag_agent = registry.rag
+    extractor_agent = registry.extractor
     retriever_tool = RetrieverTool()
     
     llm = ModelRegistry.get_heavy_llm(temperature=0.0, json_mode=True)

@@ -72,6 +72,7 @@ class EvaluationResult:
             "correct_answer": self.correct_answer,
             "predicted_answer": self.predicted_answer,
             "is_correct": self.is_correct,
+            "raw_response": self.raw_response, # Added for debugging
             "sources": self.sources,
             "latency_seconds": round(self.latency_seconds, 2),
             "error": self.error,
@@ -186,6 +187,9 @@ class PubMedQAEvaluator:
     
     # Patterns for extracting answers from LLM responses
     ANSWER_PATTERNS = [
+        # High-priority: **Final Answer: yes/no/maybe** format (added for PubMedQA)
+        r"\*\*final\s+answer:\s*(yes|no|maybe)\*\*",
+        r"final\s+answer:\s*\*?\*?(yes|no|maybe)\*?\*?",
         # Explicit final answer patterns
         r"(?:final\s+)?answer\s*(?:is|:)\s*[\"']?\b(yes|no|maybe)\b[\"']?",
         r"(?:my\s+)?(?:conclusion|verdict)\s*(?:is|:)\s*[\"']?\b(yes|no|maybe)\b[\"']?",

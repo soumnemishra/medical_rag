@@ -9,6 +9,9 @@ logger = logging.getLogger(__name__)
 
 async def main():
     print("Initializing MA-RAG Pipeline...")
+    from src.agents.registry import AgentRegistry
+    AgentRegistry.get_instance().initialize()
+    
     graph = build_graph()
     
     question = "What are the effective treatments for Hirschsprung's Disease?"

@@ -29,8 +29,14 @@ async def main():
     )
     
     # 3. Run Evaluation
-    print("Starting Pilot Evaluation (Limit: 5 samples)...")
-    results = await evaluator.evaluate(limit=5)
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--limit", type=int, default=None, help="Limit the number of samples")
+    args = parser.parse_args()
+    
+    limit_text = f"Limit: {args.limit} samples" if args.limit else "Full Evaluation"
+    print(f"Starting {limit_text}...")
+    results = await evaluator.evaluate(limit=args.limit)
     
     print("\nEvaluation Complete.")
     print(results.summary())

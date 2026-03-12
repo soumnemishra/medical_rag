@@ -90,22 +90,33 @@ class PubMedQADataset:
                 raise IngestError("No PubMedQA data found in benchmark file")
                 
             raw_questions = data["pubmedqa"]
+        
+            # Handle both list and dict formats
+            if isinstance(raw_questions, dict):
+                items = [(qid, qdata) for qid, qdata in raw_questions.items()]
+            else:
+                items = [(f"pubmedqa_{i}", item) for i, item in enumerate(raw_questions)]
             
-            for i, item in enumerate(raw_questions):
-                # Map answer text to options
-                answer_text = item.get("answer", "maybe").lower()
-                
-                # Determine correct option letter
-                if answer_text == "yes":
-                    correct_option = "A"
-                elif answer_text == "no":
-                    correct_option = "B"
+            for question_id, item in items:
+                # Map answer text to options - handle both "A"/"B"/"C" and "yes"/"no"/"maybe"
+                answer_raw = item.get("answer", "maybe")
+                if answer_raw in ["A", "B", "C"]:
+                    # Answer is already an option letter
+                    correct_option = answer_raw
+                    answer_text = {"A": "yes", "B": "no", "C": "maybe"}.get(answer_raw, "maybe")
                 else:
-                    correct_option = "C"
-                    answer_text = "maybe"
+                    # Answer is text like "yes", "no", "maybe"
+                    answer_text = str(answer_raw).lower()
+                    if answer_text == "yes":
+                        correct_option = "A"
+                    elif answer_text == "no":
+                        correct_option = "B"
+                    else:
+                        correct_option = "C"
+                        answer_text = "maybe"
                     
                 q = PubMedQAQuestion(
-                    question_id=item.get("id", f"pubmedqa_{i}"),
+                    question_id=question_id,
                     question=item.get("question", ""),
                     options={"A": "yes", "B": "no", "C": "maybe"},
                     correct_answer=correct_option,

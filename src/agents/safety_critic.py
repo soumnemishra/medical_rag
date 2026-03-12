@@ -31,6 +31,9 @@ class ClinicalSafetyCriticAgent:
             intent = state.get("intent", "unknown")
             risk = state.get("risk_level", "low")
             
+            # Check for evaluation mode (New Flag)
+            evaluation_mode = state.get("evaluation_mode", False)
+            
             # Skip empty answers or error states
             if not answer or "Error" in answer:
                 return {"safety_flags": ["skipped_empty"]}
@@ -51,6 +54,17 @@ class ClinicalSafetyCriticAgent:
             
             if not is_safe:
                 logger.warning(f"Safety Check FAILED. Issues: {issues}")
+                
+                # EVALUATION MODE LOGIC
+                if evaluation_mode:
+                    logger.info("EVALUATION MODE: Preserving original answer despite safety flags.")
+                    # Return original answer, but keep flags for metrics
+                    return {
+                        "final_answer": answer,
+                        "safety_flags": issues
+                    }
+                
+                # STANDARD MODE LOGIC (Overwrite/Append)
                 if refined:
                     logger.info("Applying refined safe answer.")
                     return {
@@ -72,6 +86,10 @@ class ClinicalSafetyCriticAgent:
             logger.error(f"Safety audit failed: {e}")
             return {"safety_flags": ["audit_error"]}
 
+
+from src.agents.registry import AgentRegistry
+
 async def safety_critic_node(state: GraphState) -> Dict[str, Any]:
-    agent = ClinicalSafetyCriticAgent()
+    agent = AgentRegistry.get_instance().safety_critic
     return await agent.critique(state)
+

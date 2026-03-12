@@ -186,13 +186,20 @@ RAG_CHAT_BOT_MRAGE/
 │   │
 │   ├── agents/                     # Specialized agents
 │   │   ├── clinical_intent.py      # Risk/intent classification
-│   │   ├── planner.py              # Query decomposition
-│   │   ├── executor.py             # Nested execution graph
-│   │   ├── step_definer.py         # Task routing logic
-│   │   ├── extractor.py            # Document fact extraction
+│   │   ├── decision_alignment.py   # Aligns evidence decisions
+│   │   ├── evidence_decision_agent.py # Agent for evidence decisions
+│   │   ├── evidence_polarity_agent.py # Agent for determining polarity
 │   │   ├── evidence_scorer.py      # Evidence quality grading
+│   │   ├── executor.py             # Nested execution graph
+│   │   ├── extractor.py            # Document fact extraction
+│   │   ├── planner.py              # Query decomposition
 │   │   ├── rag.py                  # Context-aware QA
-│   │   └── safety_critic.py        # Answer safety audit
+│   │   ├── rag_node.py             # RAG execution node
+│   │   ├── registry.py             # Agent registry
+│   │   ├── router_agent.py         # Routes queries based on intent
+│   │   ├── safety_critic.py        # Answer safety audit
+│   │   ├── step_definer.py         # Task routing logic
+│   │   └── supplemental_retrieval_node.py # Fallback/supplemental retrieval
 │   │
 │   ├── orchestrator/               # Graph orchestration
 │   │   └── graph.py                # LangGraph main pipeline
@@ -220,7 +227,10 @@ RAG_CHAT_BOT_MRAGE/
 │   ├── test_pubmed_client.py
 │   ├── test_query_builder.py
 │   ├── test_evaluator.py
-│   └── test_pubmedqa_dataset.py
+│   ├── test_pubmedqa_dataset.py
+│   ├── test_registry.py            # Agent registry tests
+│   ├── test_router_verification.py # Router agent verification tests
+│   └── verify_evidence_decision.py # Tests for evidence decision
 │
 ├── data/                           # Benchmark data
 │   └── benchmark.json              # PubMedQA dataset
@@ -255,6 +265,10 @@ RAG_CHAT_BOT_MRAGE/
 | `EvidenceScorerAgent` | Grade evidence A/B/C | Flash (Fast) | ✓ |
 | `RagAgent` | Generate contextual answers | Heavy (Smart) | ✓ |
 | `ClinicalSafetyCriticAgent` | Audit safety compliance | Heavy (Smart) | ✓ |
+| `DecisionAlignmentAgent` | Aligns multiple evidence decisions | Flash (Fast) | ✓ |
+| `EvidenceDecisionAgent` | Makes decision based on evidence | Flash (Fast) | ✓ |
+| `EvidencePolarityAgent` | Determines polarity of evidence | Flash (Fast) | ✓ |
+| `RouterAgent` | Routes queries dynamically | Flash (Fast) | ✓ |
 
 ---
 
