@@ -15,7 +15,7 @@ class PlannerAgent:
     
     def __init__(self):
         self.llm = ModelRegistry.get_heavy_llm(temperature=0.0, json_mode=True)
-        self.parser = JsonOutputParser()
+        self.parser = JsonOutputParser(pydantic_object=PlanFormat)
         
         self.prompt = ChatPromptTemplate.from_messages([
             ("system", PLANNING_SYSTEM_PROMPT),
@@ -27,18 +27,23 @@ class PlannerAgent:
         if not past_exp:
             return "No past experience."
             
-        memory_str = ""
+        lines = []
         for i, exp in enumerate(past_exp):
-            plan_str = ", ".join(exp.get("plan", []))
-            summary = exp.get("plan_summary", {})
-            status = summary.get("output", "Unknown")
-            score = summary.get("score", 0)
+            lines.append(f"Attempt {i+1}:")
+            for j, step in enumerate(exp.get("plan", [])):
+                # We need to extract results accurately if step outputs differ in schema
+                # Falling back to empty object checks
+                result = exp.get("step_output", [])[j] if j < len(exp.get("step_output", [])) else {}
+                status = result.get("success", "unknown") if isinstance(result, dict) else "unknown"
+                docs = exp.get("step_docs_ids", [])[j] if j < len(exp.get("step_docs_ids", [])) else []
+                doc_count = len(docs)
+                step_val = step.get("question", step) if isinstance(step, dict) else step
+                lines.append(f"  Step {j+1}: '{step_val}' → {status}, {doc_count} docs found")
             
-            memory_str += f"Trial {i+1}:\n"
-            memory_str += f"Plan: [{plan_str}]\n"
-            memory_str += f"Status: {status} Score: {score}\n\n"
-            
-        return memory_str
+            score = exp.get("plan_summary", {}).get("score", 0) if isinstance(exp.get("plan_summary"), dict) else 0
+            lines.append(f"  Overall score: {score}/1.0")
+            lines.append(f"  Lesson: {exp.get('lesson', 'none recorded')}")
+        return "\n".join(lines)
 
     async def plan(self, state: GraphState) -> Dict[str, Any]:
         """
@@ -47,39 +52,61 @@ class PlannerAgent:
         try:
             question = state["original_question"]
             past_exp = state.get("past_exp", [])
+            intent = state.get("intent", "informational")
+            risk_level = state.get("risk_level", "low")
+            needs_guidelines = state.get("needs_guidelines", False)
+            
             memory = self._format_memory(past_exp)
             
-            logger.info(f"PLANNING for: {question}")
+            logger.info(f"PLANNING for: {question} (Intent: {intent}, Risk: {risk_level})")
             
             # Using the parser in the chain
             chain = self.prompt | self.llm | self.parser
             
             result = await chain.ainvoke({
                 "question": question,
-                "memory": memory
+                "memory": memory,
+                "intent": intent,
+                "risk_level": risk_level,
+                "needs_guidelines": needs_guidelines
             })
             
-            raw_steps = result.get("step", [])
+            raw_steps = result.get("plan", [])
             
-            # Normalize steps to List[str] - handle both string and dict formats
             steps = []
             for step in raw_steps:
-                if isinstance(step, str):
-                    steps.append(step)
-                elif isinstance(step, dict):
-                    # LLM sometimes returns {'type': 'Search', 'question': '...'} format
-                    step_text = step.get("question") or step.get("task") or step.get("step") or str(step)
-                    steps.append(step_text)
+                if isinstance(step, dict):
+                    # Keep valid structure assuming LLM mapped output to format
+                    if "id" not in step or "question" not in step:
+                        steps.append({"id": len(steps)+1, "question": step.get("question", str(step)), "depends_on": []})
+                    else:
+                        steps.append(step)
+                elif isinstance(step, str):
+                    steps.append({"id": len(steps)+1, "question": step, "depends_on": []})
                 else:
-                    steps.append(str(step))
+                    steps.append({"id": len(steps)+1, "question": str(step), "depends_on": []})
             
-            logger.info(f"Generated Plan: {steps}")
-            return {"plan": steps}
+            if not steps:
+                logger.error("Planner returned empty steps — LLM may have returned wrong key")
+                return {
+                    "plan": [],
+                    "safety_flags": state.get("safety_flags", []) + ["empty_plan"]
+                }
+            
+            logger.info(f"Generated Plan ({len(steps)} steps): {[s.get('question', '') for s in steps]}")
+            return {
+                "plan": steps,
+                "plan_complexity": result.get("complexity", "moderate")
+            }
             
         except Exception as e:
             logger.error(f"Planning failed: {e}")
-            # Fallback
-            return {"plan": [f"Answer the question: {state['original_question']}"]}
+            # Fallback that propagates errors correctly
+            return {
+                "plan": [],
+                "plan_error": str(e),
+                "safety_flags": state.get("safety_flags", []) + ["planning_failed"]
+            }
 
 
 from src.agents.registry import AgentRegistry

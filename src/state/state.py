@@ -59,11 +59,16 @@ class QAAnswerFormat(BaseModel):
     # this is the self reported confidence score . It can use for the model caliberation 
     rating: int = Field(default=None, description="Confidence rating 0-10. More evidence = higher score")
 
-class PlanFormat(BaseModel):
-    analysis: str = Field(description="Your analysis. Think step-by-step")
+class PlanStep(BaseModel):
+    id: int
+    question: str
+    depends_on: List[int] = []
+    step_type: str = "question-answering"  # or "aggregate"
 
-    # this is the sequence of sub question that the plananr agent generates to solve a complex query 
-    step: List[str] = Field(description="Different steps to follow, should be in sorted order")
+class PlanFormat(BaseModel):
+    plan: List[PlanStep]
+    total_steps: int
+    complexity: str  # "simple" | "moderate" | "complex"
 
 class StepTaskFormat(BaseModel):
     # this is used by the step definer . It labels task as the aggregate (summarizing what we know 
@@ -82,6 +87,8 @@ class ClinicalIntentFormat(BaseModel):
     risk_level: str = Field(description="Risk level: 'low', 'medium', 'high'")
     requires_disclaimer: bool = Field(description="Whether a disclaimer is mandatory")
     needs_guidelines: bool = Field(description="Whether clinical guidelines are required")
+    confidence: float = Field(ge=0.0, le=1.0, description="0.0=uncertain, 1.0=certain")
+    reasoning: str = Field(description="One sentence explanation of classification")
 
 
 # =============================================================================
@@ -114,6 +121,8 @@ class ClinicalIntentState(TypedDict):
     risk_level: str
     requires_disclaimer: bool
     needs_guidelines: bool
+    confidence: float
+    reasoning: str
 
 
 class RouterOutput(TypedDict):
@@ -201,6 +210,8 @@ class GraphState(TypedDict):
     safety_flags: List[str]
     requires_disclaimer: bool
     needs_guidelines: bool
+    confidence: float
+    reasoning: str
     #this descides the speed of the system whether the question goes to the direct qa or complex qa
     router_output: RouterOutput # Output from RouterAgent
     evaluation_mode: bool # If True, SafetyCritic preserves unsafe answers (for benchmarking)

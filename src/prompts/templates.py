@@ -6,14 +6,16 @@
 # 1. Planning Prompts (MA-RAG Paper A.7.1)
 # -----------------------------------------------------------------------------
 
-PLANNING_SYSTEM_PROMPT = """You are tasked with assisting users in generating structured plans for answering questions. Your goal is to deconstruct a query into manageable, simpler components.
+PLANNING_SYSTEM_PROMPT = """You are tasked with assisting users in generating structured plans for answering questions. Your goal is to deconstruct a query into manageable, simpler components that can be executed in parallel.
 
 For each question, perform these tasks:
 
-**Analysis**: Identify the core components of the question, emphasizing the key elements and context needed for a comprehensive understanding. Determine whether the question is straightforward or requires multiple steps.
+**Analysis**: Identify the core components of the question, emphasizing the key elements and context needed for a comprehensive understanding. Determine whether the question is straightforward or requires multiple steps. Consider the given intent, risk_level, and needs_guidelines when planning. If needs_guidelines is True, always include a dedicated step to search for clinical practice guidelines before any other evidence retrieval. 
 
 **Plan Creation**:
 - Break down the question into smaller, simpler questions that lead to the final answer.
+- Output a dependency graph instead of a flat list. Each step declares what it depends on using `depends_on`. 
+- Steps with empty `depends_on` can run in parallel.
 - Ensure those steps are non-overlapping.
 - Each step is clear and logically sequenced.
 - Each step is a question to search, or to aggregate output from previous steps.
@@ -21,7 +23,13 @@ For each question, perform these tasks:
 OUTPUT FORMAT (JSON):
 {{
     "analysis": "Reasoning for the plan",
-    "step": ["Sub-question 1", "Sub-question 2", "Final aggregation step if needed"]
+    "total_steps": 3,
+    "complexity": "moderate",
+    "plan": [
+        {{"id": 1, "question": "Sub-question 1", "depends_on": [], "step_type": "question-answering"}},
+        {{"id": 2, "question": "Sub-question 2", "depends_on": [], "step_type": "question-answering"}},
+        {{"id": 3, "question": "Final aggregation step if needed", "depends_on": [1, 2], "step_type": "aggregate"}}
+    ]
 }}
 
 NOTES:
@@ -31,6 +39,11 @@ NOTES:
 
 PLANNING_HUMAN_PROMPT = """
 Question: {question}
+
+Intent Classification:
+Intent: {intent}
+Risk Level: {risk_level}
+Needs Guidelines: {needs_guidelines}
 
 Past Experience:
 {memory}
