@@ -59,9 +59,9 @@ class MockMedicalAgent:
 def mock_agent() -> MockMedicalAgent:
     """Create a mock agent with predefined responses."""
     return MockMedicalAgent(responses={
-        "vitamin d": "Based on multiple studies, vitamin D deficiency is indeed associated with increased diabetes risk. The answer is **yes**.",
-        "aspirin": "The evidence does not support aspirin for all age groups. My conclusion is: no.",
-        "coffee": "The relationship is not conclusive. Answer: maybe",
+        "vitamin d": "Based on multiple studies, vitamin D deficiency is indeed associated with increased diabetes risk. The answer is **A**.",
+        "aspirin": "The evidence does Bt support aspirin for all age groups. My conclusion is: B.",
+        "coffee": "The relationship is Bt conclusive. Answer: C",
     })
 
 
@@ -72,23 +72,23 @@ def sample_questions() -> list[PubMedQAQuestion]:
         PubMedQAQuestion(
             question_id="q1",
             question="Is vitamin D deficiency associated with diabetes?",
-            options={"A": "yes", "B": "no", "C": "maybe"},
+            options={"A": "A", "B": "B", "C": "C"},
             correct_answer="A",
-            correct_answer_text="yes",
+            correct_answer_text="A",
         ),
         PubMedQAQuestion(
             question_id="q2",
             question="Does aspirin prevent events in all age groups?",
-            options={"A": "yes", "B": "no", "C": "maybe"},
+            options={"A": "A", "B": "B", "C": "C"},
             correct_answer="B",
-            correct_answer_text="no",
+            correct_answer_text="B",
         ),
         PubMedQAQuestion(
             question_id="q3",
             question="Is coffee and longevity relationship conclusive?",
-            options={"A": "yes", "B": "no", "C": "maybe"},
+            options={"A": "A", "B": "B", "C": "C"},
             correct_answer="C",
-            correct_answer_text="maybe",
+            correct_answer_text="C",
         ),
     ]
 
@@ -109,68 +109,61 @@ class TestAnswerExtraction:
     
     def test_extract_explicit_answer_is(self, evaluator: PubMedQAEvaluator):
         """Test extraction of 'the answer is X' format."""
-        assert evaluator.extract_answer("The answer is yes.") == "yes"
-        assert evaluator.extract_answer("The answer is no.") == "no"
-        assert evaluator.extract_answer("The answer is maybe.") == "maybe"
+        assert evaluator.extract_answer("The answer is A.") == "A"
+        assert evaluator.extract_answer("The answer is B.") == "B"
+        assert evaluator.extract_answer("The answer is C.") == "C"
     
     def test_extract_final_answer(self, evaluator: PubMedQAEvaluator):
         """Test extraction of 'final answer' format."""
-        assert evaluator.extract_answer("My final answer is yes") == "yes"
-        assert evaluator.extract_answer("Final answer: no") == "no"
+        assert evaluator.extract_answer("My final answer is A") == "A"
+        assert evaluator.extract_answer("Final answer: B") == "B"
     
     def test_extract_conclusion(self, evaluator: PubMedQAEvaluator):
         """Test extraction of 'conclusion' format."""
-        assert evaluator.extract_answer("My conclusion is yes.") == "yes"
-        assert evaluator.extract_answer("In conclusion: no") == "no"
+        assert evaluator.extract_answer("My conclusion is A.") == "A"
+        assert evaluator.extract_answer("In conclusion: B") == "B"
     
     def test_extract_bold_answer(self, evaluator: PubMedQAEvaluator):
         """Test extraction of bold markdown answers."""
-        assert evaluator.extract_answer("So the answer is **yes**") == "yes"
-        assert evaluator.extract_answer("Therefore: **no**") == "no"
+        assert evaluator.extract_answer("So the answer is **A**") == "A"
+        assert evaluator.extract_answer("Therefore: **B**") == "B"
     
     def test_extract_bracketed_answer(self, evaluator: PubMedQAEvaluator):
         """Test extraction of bracketed answers."""
-        assert evaluator.extract_answer("The answer is [yes]") == "yes"
-        assert evaluator.extract_answer("[no]") == "no"
+        assert evaluator.extract_answer("The answer is [A]") == "A"
+        assert evaluator.extract_answer("[B]") == "B"
     
     def test_extract_option_letter(self, evaluator: PubMedQAEvaluator):
         """Test extraction when LLM answers with option letter."""
-        assert evaluator.extract_answer("I choose option A") == "yes"
-        assert evaluator.extract_answer("The correct option is B") == "no"
-        assert evaluator.extract_answer("Option C is the answer") == "maybe"
+        assert evaluator.extract_answer("I choose option A") == "A"
+        assert evaluator.extract_answer("The correct option is B") == "B"
+        assert evaluator.extract_answer("Option C is the answer") == "C"
     
     def test_extract_last_occurrence(self, evaluator: PubMedQAEvaluator):
         """Test that last answer is taken when multiple are present."""
         response = """
-        Initially I thought yes, but after review...
-        The evidence suggests no.
-        Actually, the final answer is maybe.
+        Initially I thought A, but after review...
+        The evidence suggests B.
+        Actually, the final answer is C.
         """
-        assert evaluator.extract_answer(response) == "maybe"
+        assert evaluator.extract_answer(response) == "C"
     
     def test_extract_case_insensitive(self, evaluator: PubMedQAEvaluator):
         """Test case insensitive extraction."""
-        assert evaluator.extract_answer("The answer is YES") == "yes"
-        assert evaluator.extract_answer("The answer is NO") == "no"
-        assert evaluator.extract_answer("MAYBE") == "maybe"
+        assert evaluator.extract_answer("The answer is A") == "A"
+        assert evaluator.extract_answer("The answer is B") == "B"
+        assert evaluator.extract_answer("C") == "C"
     
     def test_extract_with_punctuation(self, evaluator: PubMedQAEvaluator):
         """Test extraction with various punctuation."""
-        assert evaluator.extract_answer("Answer: yes.") == "yes"
-        assert evaluator.extract_answer("Answer: no!") == "no"
-        assert evaluator.extract_answer("Answer: 'maybe'") == "maybe"
-    
-    def test_extract_fallback_counting(self, evaluator: PubMedQAEvaluator):
-        """Test fallback counting when no pattern matches."""
-        response = "Yes, this is true. Yes, confirmed. Yes."
-        # Should count and return most frequent in last part
-        result = evaluator.extract_answer(response)
-        assert result == "yes"
+        assert evaluator.extract_answer("Answer: A.") == "A"
+        assert evaluator.extract_answer("Answer: B!") == "B"
+        assert evaluator.extract_answer("Answer: 'C'") == "C"
     
     def test_extract_unknown(self, evaluator: PubMedQAEvaluator):
-        """Test unknown result when no answer found."""
+        """Test unknown result when B answer found."""
         result = evaluator.extract_answer("I cannot determine the answer from the data.")
-        assert result == "unknown"
+        assert result == "UNKNOWN"
 
 
 class TestEvaluationResult:
@@ -181,8 +174,8 @@ class TestEvaluationResult:
         result = EvaluationResult(
             question_id="q1",
             question="Test question?",
-            correct_answer="yes",
-            predicted_answer="yes",
+            correct_answer="A",
+            predicted_answer="A",
             is_correct=True,
             latency_seconds=1.5,
         )
@@ -195,8 +188,8 @@ class TestEvaluationResult:
         result = EvaluationResult(
             question_id="q1",
             question="Test question?",
-            correct_answer="yes",
-            predicted_answer="no",
+            correct_answer="A",
+            predicted_answer="B",
             is_correct=False,
         )
         
@@ -207,8 +200,8 @@ class TestEvaluationResult:
         result = EvaluationResult(
             question_id="q1",
             question="Test question?",
-            correct_answer="yes",
-            predicted_answer="yes",
+            correct_answer="A",
+            predicted_answer="A",
             is_correct=True,
             sources=["123", "456"],
             latency_seconds=1.234,
@@ -230,8 +223,8 @@ class TestDatasetResults:
         results = DatasetResults()
         
         results.add_result(EvaluationResult(
-            question_id="q1", question="Q1", correct_answer="yes",
-            predicted_answer="yes", is_correct=True
+            question_id="q1", question="Q1", correct_answer="A",
+            predicted_answer="A", is_correct=True
         ))
         
         assert results.total_questions == 1
@@ -239,8 +232,8 @@ class TestDatasetResults:
         assert results.accuracy == 100.0
         
         results.add_result(EvaluationResult(
-            question_id="q2", question="Q2", correct_answer="no",
-            predicted_answer="yes", is_correct=False
+            question_id="q2", question="Q2", correct_answer="B",
+            predicted_answer="A", is_correct=False
         ))
         
         assert results.total_questions == 2
@@ -251,7 +244,7 @@ class TestDatasetResults:
         """Test tracking of answer distribution."""
         results = DatasetResults()
         
-        for answer in ["yes", "yes", "no", "maybe"]:
+        for answer in ["A", "A", "B", "C"]:
             results.add_result(EvaluationResult(
                 question_id=f"q{answer}",
                 question="Q",
@@ -260,16 +253,16 @@ class TestDatasetResults:
                 is_correct=True,
             ))
         
-        assert results.answer_distribution["yes"] == 2
-        assert results.answer_distribution["no"] == 1
-        assert results.answer_distribution["maybe"] == 1
+        assert results.answer_distribution["a"] == 2
+        assert results.answer_distribution["b"] == 1
+        assert results.answer_distribution["c"] == 1
     
     def test_summary_output(self):
         """Test summary generation."""
         results = DatasetResults(dataset_name="pubmedqa")
         results.add_result(EvaluationResult(
-            question_id="q1", question="Q1", correct_answer="yes",
-            predicted_answer="yes", is_correct=True
+            question_id="q1", question="Q1", correct_answer="A",
+            predicted_answer="A", is_correct=True
         ))
         
         summary = results.summary()
@@ -312,7 +305,7 @@ class TestPubMedQAEvaluator:
         result = await evaluator.evaluate_question(question)
         
         assert result.question_id == "q1"
-        assert result.predicted_answer == "yes"
+        assert result.predicted_answer == "A"
         assert result.is_correct is True
         assert result.latency_seconds >= 0  # Mock is instant, so >= 0
     
@@ -335,9 +328,9 @@ class TestPubMedQAEvaluator:
         question = PubMedQAQuestion(
             question_id="error_q",
             question="Will this fail?",
-            options={"A": "yes", "B": "no", "C": "maybe"},
+            options={"A": "A", "B": "B", "C": "C"},
             correct_answer="A",
-            correct_answer_text="yes",
+            correct_answer_text="A",
         )
         
         result = await evaluator.evaluate_question(question)

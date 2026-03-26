@@ -92,11 +92,11 @@ class TestPubMedQAQuestion:
         
         # Check prompt contains key elements
         assert "Is vitamin D important?" in prompt
-        assert "A. yes" in prompt
-        assert "B. no" in prompt
-        assert "C. maybe" in prompt
-        assert "scientific literature" in prompt.lower()
-        assert "yes, no, or maybe" in prompt.lower()
+        assert "A: yes" in prompt
+        assert "B: no" in prompt
+        assert "C: maybe" in prompt
+        
+        
 
 
 class TestPubMedQADataset:

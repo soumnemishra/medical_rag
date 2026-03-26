@@ -184,23 +184,35 @@ class PubMedQAEvaluator:
     - Saving intermediate and final results
     """
     
-    # Patterns for extracting answers from LLM responses
+    # Universal Multiple-Choice Regex Patterns
     ANSWER_PATTERNS = [
-        # Explicit final answer patterns
-        r"(?:final\s+)?answer\s*(?:is|:)\s*[\"']?\b(yes|no|maybe)\b[\"']?",
-        r"(?:my\s+)?(?:conclusion|verdict)\s*(?:is|:)\s*[\"']?\b(yes|no|maybe)\b[\"']?",
-        r"(?:the\s+)?(?:correct\s+)?answer\s*(?:is|would be|should be)\s*[\"']?\b(yes|no|maybe)\b[\"']?",
-        # Option format - improved patterns
-        r"(?:i\s+)?(?:choose|select|pick)\s*(?:option\s*)?[\"']?\b([abc])\b[\"']?",
-        r"(?:the\s+)?(?:correct\s+)?option\s+(?:is\s+)?([abc])\b",
-        r"option\s+([abc])\s*(?:is\s+correct|is\s+the\s+answer)?",
-        # Standalone at end of response
-        r"(?:^|\n)\s*\**\s*(yes|no|maybe)\s*\**\s*(?:$|\n)",
-        # Bracketed answers
-        r"\[(yes|no|maybe)\]",
-        r"\*\*(yes|no|maybe)\*\*",
+        r"(?:final\s+)?answer\s*(?:is|:)\s*[\"']?\b([A-Ea-e])\b[\"']?",
+        r"(?:my\s+)?(?:conclusion|verdict)\s*(?:is|:)\s*[\"']?\b([A-Ea-e])\b[\"']?",
+        r"(?:the\s+)?(?:correct\s+)?(?:option|answer)\s*(?:is|would be|should be)\s*[\"']?\b([A-Ea-e])\b[\"']?",
+        r"(?:i\s+)?(?:choose|select|pick)\s*(?:option\s*)?[\"']?\b([A-Ea-e])\b[\"']?",
+        r"option\s+([A-Ea-e])\s*(?:is\s+correct|is\s+the\s+answer)?",
+        r"(?:^|\n)\s*\**\s*([A-Ea-e])\s*\**\s*(?:$|\n)",
+        r"\[([A-Ea-e])\]",
+        r"\*\*([A-Ea-e])\*\*",
     ]
     
+    def extract_answer(self, response: str) -> str:
+        """
+        Extract A/B/C/D/E multiple choice answer from LLM response.
+        """
+        # Try each pattern in order of specificity
+        for pattern in self.ANSWER_PATTERNS:
+            matches = re.findall(pattern, response, re.IGNORECASE | re.MULTILINE)
+            if matches:
+                # Take the last match (often models put the final answer at the very end)
+                return matches[-1].strip().upper()
+        
+        logger.warning(
+            "Could not extract a letter answer from response",
+            extra={"response_preview": response[:200]}
+        )
+        return "UNKNOWN"
+
     def __init__(
         self,
         agent: Any,  # MedicalAgent type, using Any to avoid circular import
@@ -236,49 +248,20 @@ class PubMedQAEvaluator:
     
     def extract_answer(self, response: str) -> str:
         """
-        Extract yes/no/maybe answer from LLM response.
-        
-        Uses multiple regex patterns to find the answer, prioritizing
-        explicit answer statements over implicit mentions.
-        
-        Args:
-            response: Raw LLM response text.
-        
-        Returns:
-            Extracted answer: "yes", "no", "maybe", or "unknown".
+        Extract A/B/C/D/E multiple choice answer from LLM response.
         """
-        response_lower = response.lower()
-        
-        # Option mapping for when LLM answers with A/B/C
-        option_map = {"a": "yes", "b": "no", "c": "maybe"}
-        
         # Try each pattern in order of specificity
         for pattern in self.ANSWER_PATTERNS:
-            matches = re.findall(pattern, response_lower, re.IGNORECASE | re.MULTILINE)
+            matches = re.findall(pattern, response, re.IGNORECASE | re.MULTILINE)
             if matches:
-                match = matches[-1]  # Take the last match (likely the final answer)
-                # Handle option letter answers
-                if match.lower() in option_map:
-                    return option_map[match.lower()]
-                if match.lower() in ["yes", "no", "maybe"]:
-                    return match.lower()
-        
-        # Fallback: count occurrences and take the most frequent in last 200 chars
-        last_part = response_lower[-200:]
-        counts = {
-            "yes": len(re.findall(r"\byes\b", last_part)),
-            "no": len(re.findall(r"\bno\b", last_part)),
-            "maybe": len(re.findall(r"\bmaybe\b", last_part)),
-        }
-        
-        if max(counts.values()) > 0:
-            return max(counts, key=counts.get)
+                # Take the last match (often models put the final answer at the very end)
+                return matches[-1].strip().upper()
         
         logger.warning(
-            "Could not extract answer from response",
+            "Could not extract a letter answer from response",
             extra={"response_preview": response[:200]}
         )
-        return "unknown"
+        return "UNKNOWN"
     
     async def evaluate_question(
         self,
@@ -304,7 +287,7 @@ class PubMedQAEvaluator:
             
             # Extract answer from response
             predicted = self.extract_answer(result.answer)
-            correct = question.correct_answer_text.lower()
+            correct = question.correct_answer_text.upper()
             is_correct = predicted == correct
             
             logger.info(

@@ -1,4 +1,19 @@
 # FILE: src/pubmed_client.py
+# this file basically is resposible for fetches the data from the pub med and then parse them clean them 
+# and returns the validated #document that we can feed to our llms 
+
+# it is the data ingestion and validation layer of the base rag system 
+# this goes in this sequence 
+# e seach --> e fetch --> filtering --> validation --> llm 
+''' if we take into consideration of the medical hosptital 
+e search --> search the patents
+e fetch --> get the full documents
+
+filtering --> remove irrlelvant cases
+validate --> check reports are usable 
+llm ready documents 
+'''
+
 """
 PubMed E-utilities client with 2-stage retrieval pipeline.
 
@@ -8,7 +23,7 @@ Implements a production-grade retrieval system:
 Architecture:
     1. eSearch: Query → PMIDs (JSON response)
     2. eFetch: PMIDs → Full articles (XML response)
-    3. Post-retrieval filtering (Humans, date, study type)
+    3. Post-retrieval filtering (Humans, date, study type) # it filers out the human studies 
     4. Pydantic validation layer
 
 Example Usage:
@@ -20,22 +35,27 @@ Example Usage:
         print(doc.pmid, doc.title)
 """
 
-import logging
+import logging # we log important events for easy debugging and monitoring 
 from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum
+from datetime import datetime # for date time filtering of articles 
+from enum import Enum # enum for study types 
 from typing import List, Optional, Set
 
-import requests
-from bs4 import BeautifulSoup
-from pydantic import BaseModel, Field, field_validator
+import requests #http client for making request to pubmed api
+from bs4 import BeautifulSoup #used to traverse the xml data returned by the pubmed 
+# this ensure strict check this ensures that data entring to agents is strictly validated and clean 
+#if pub med return the garbage data or empty data the pydantic will catches the garbage before it reaches the llm
+from pydantic import BaseModel, Field, field_validator # data validations The star of the validation layer. 
+#It ensures every document we produce is clean, with correct types and non-empty abstracts.
+
+# if api fails then try again intelligetly 
 from tenacity import (
     retry,
     stop_after_attempt,
     wait_exponential,
     retry_if_exception_type,
 )
-
+# import the configuration s setting 
 from src.config import settings
 from src.exceptions import PubMedAPIError, TransientError
 
@@ -47,7 +67,11 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 class StudyType(str, Enum):
-    """Accepted study types for clinical relevance."""
+
+    """Accepted study types for clinical relevance.
+    this tells that we accept this types of studies only for our rag system and we will filter out the rest of the studies
+    the enum helps us to have a predefined set of study types that we consider relevant for our use case.
+    and removes the typo"""
     CLINICAL_TRIAL = "Clinical Trial"
     RCT = "Randomized Controlled Trial"
     SYSTEMATIC_REVIEW = "Systematic Review"
@@ -65,6 +89,8 @@ ALLOWED_STUDY_TYPES: Set[str] = {st.value for st in StudyType}
 # Pydantic Models (Validation Layer)
 # =============================================================================
 
+# this is the data validation layer of how should the retreive document should look like and what are the require fields
+# this is being validated by the pydantic base model and the field validators 
 class RetrievedDocument(BaseModel):
     """
     Validated PubMed document ready for RAG pipeline.
@@ -94,14 +120,18 @@ class RetrievedDocument(BaseModel):
     mesh_terms: List[str] = Field(default_factory=list, description="MeSH terms")
     source: str = Field(default="PubMed", description="Data source")
     
+    # the bouncer the pub med sometimes return the emppty abstract or some papers have 
+    #whose xm have the title, authors , pmid , but the <abstract> tag is completely empty 
     @field_validator("abstract")
     @classmethod
     def abstract_not_empty(cls, v: str) -> str:
-        """Reject articles without abstracts."""
+        """Reject articles without abstracts.
+        it says if no abstracts or not v.strip() then raise the value error """
         if not v or not v.strip():
             raise ValueError("Abstract cannot be empty")
         return v.strip()
     
+    ### it 
     def to_context_string(self) -> str:
         """Format document as context string for LLM."""
         authors_str = ", ".join(self.authors[:3])
@@ -118,13 +148,12 @@ class RetrievedDocument(BaseModel):
             f"PMID: {self.pmid}\n\n"
             f"{self.abstract}\n"
         )
-    ####################### only used in the tests files #################################
-    # def to_citation(self) -> str:
-    #     """Format as citation."""
-    #     authors_str = ", ".join(self.authors[:3])
-    #     if len(self.authors) > 3:
-    #         authors_str += " et al."
-    #     return f"{authors_str}. {self.title}. {self.journal}. {self.year or 'N/A'}. PMID: {self.pmid}"
+    def to_citation(self) -> str:
+        """Format as citation."""
+        authors_str = ", ".join(self.authors[:3])
+        if len(self.authors) > 3:
+            authors_str += " et al."
+        return f"{authors_str}. {self.title}. {self.journal}. {self.year or 'N/A'}. PMID: {self.pmid}"
 
 
 class SearchMetadata(BaseModel):
@@ -136,6 +165,12 @@ class SearchMetadata(BaseModel):
 
 # =============================================================================
 # Raw Article (Pre-validation)
+
+##################why we use th data classs lets discuss ##########################
+''' we use the data class beacuse xml parsing is messy , when u pull data out of beautiful soup it might be 
+incomplete or misformatted if we tried to solve that raw xml data with pydantic it would be a nightmare because 
+pydantic is strict and expects clean data
+'''
 # =============================================================================
 
 @dataclass
@@ -155,7 +190,9 @@ class RawArticle:
     study_types: List[str] = field(default_factory=list)
     mesh_terms: List[str] = field(default_factory=list)
     is_human_study: bool = False
-
+#That single = False protects your entire RAG pipeline from being poisoned by 
+# irrelevant biological studies. It ensures your baseline evaluation over PubMedQA 
+# will be grounded only in verified human clinical literature.
 
 # =============================================================================
 # PubMed Client
@@ -184,7 +221,7 @@ class PubMedClient:
         api_key: Optional[str] = None,
         max_results: Optional[int] = None,
         filter_humans: bool = True,
-        filter_recent_years: Optional[int] = 7,
+        filter_recent_years: Optional[int] = None,
         filter_study_types: bool = False,
     ):
         """
