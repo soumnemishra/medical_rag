@@ -1,98 +1,107 @@
 import logging
 from typing import Dict, Any
+
 from src.state.state import GraphState, RagState
 from src.agents.rag import RagAgent
 
 logger = logging.getLogger(__name__)
 
+
 async def rag_direct_node(state: GraphState) -> Dict[str, Any]:
     """
-    Node for "Direct QA" execution mode.
-    Wraps RagAgent to execute directly on the global state without planning.
-    
+    Node for the 'Direct QA' execution path — used when the router
+    decides the query is simple enough to skip the full plan/executor
+    pipeline and answer directly.
+
+    Key design decisions vs original:
+      1. Uses AgentRegistry singleton — no RetrieverTool reload per call.
+      2. Does NOT write to past_exp. past_exp is the planner's retry
+         memory. Injecting a fake 'Direct QA' entry would corrupt the
+         planner's learning on any subsequent retry attempt.
+      3. Passes evidence_polarity to RagAgent so the QA prompt receives
+         the {evidence_polarity} variable now required by QA_HUMAN_PROMPT.
+      4. Writes step_output and step_docs_ids so SafetyCriticAgent and
+         DecisionAlignmentAgent have the data they need.
+      5. force_commitment no-op removed — dead code in a medical system
+         is a maintenance hazard.
+
     Contract:
-    - Input: GraphState
-    - Output: Updates 'final_answer' and 'past_exp' (simulated)
-    - Must populate 'doc_ids' in the final output for SafetyCritic.
+        Input:  GraphState (set by RouterAgent, ClinicalIntentAgent)
+        Output: Updates final_answer, step_output, step_docs_ids
+                Does NOT touch past_exp.
     """
-    logger.info("Executing Direct QA Path (RagNode)...")
-    
+    logger.info("Direct QA path executing (rag_direct_node)...")
+
     question = state["original_question"]
-    router_output = state.get("router_output", {})
-    answer_policy = router_output.get("answer_policy", {})
-    
-    # Adapt GraphState to RagState
-    # RagAgent expects: question, documents (optional), doc_ids, notes, final_raw_answer
-    # [MODIFIED] Inject pre-fetched documents from SupplementalRetrievalNode if present
+
+    # ── Build RagState from GraphState ─────────────────────────────
+    # RagAgent expects: question, documents, doc_ids, evidence_polarity
+    # Pre-fetched documents from SupplementalRetrievalNode (if present)
+    # are forwarded so retrieval is not duplicated.
+
+    evidence_polarity = state.get("evidence_polarity", {})
+
     rag_input: RagState = {
-        "question": question,
-        "documents": state.get("current_documents", []),     
-        "doc_ids": state.get("current_doc_ids", []),
-        "notes": [],
+        "question":         question,
+        "documents":        state.get("current_documents", []),
+        "doc_ids":          state.get("current_doc_ids", []),
+        "notes":            [],
         "final_raw_answer": {},
-        # Pass context for RAG agent if it uses it (current implementation mostly uses question)
-        "intent": state.get("intent", "informational"),
-        "risk_level": state.get("risk_level", "low"),
-        "safety_flags": state.get("safety_flags", [])
+        "intent":           state.get("intent",      "informational"),
+        "risk_level":       state.get("risk_level",  "low"),
+        "safety_flags":     state.get("safety_flags", []),
+        # Pass through polarity so RagAgent feeds {evidence_polarity}
+        # in QA_HUMAN_PROMPT — without this, LangChain raises KeyError
+        "evidence_polarity": evidence_polarity,
     }
-    
+
     try:
-        # Initialize Agent
-        agent = RagAgent()
-        
-        # Execute RAG
-        # Note: RagAgent.query performs retrieval if documents are empty
+        from src.agents.registry import AgentRegistry
+        agent = AgentRegistry.get_instance().rag
         result = await agent.query(rag_input)
-        
-        # Parse Result
-        final_raw = result.get("final_raw_answer", {})
+
+        final_raw  = result.get("final_raw_answer", {})
         answer_text = final_raw.get("answer", "No answer generated.")
-        doc_ids = result.get("doc_ids", [])
-        
-        # Policy Enforcement: Force "Yes/No" commitment if requested
-        if answer_policy.get("force_commitment", False):
-            # Simple heuristic check if model failed to follow "Final Answer:" instruction
-            # (Ideally this would be a re-prompt, but for Stage 1 we rely on the prompt)
-            pass 
-        
-        # Update GraphState
-        # We simulate a "past_exp" entry so the UI/SafetyCritic can see what happened
-        simulated_step_output = {
-            "analysis": "Direct QA Execution",
-            "answer": answer_text,
-            "success": "Yes",
-            "rating": 10
+        doc_ids     = result.get("doc_ids", [])
+
+        # Build a step_output entry so SafetyCriticAgent and
+        # DecisionAlignmentAgent have consistent data to read.
+        # Format matches what ExecutorAgent produces — one dict per step.
+        step_output_entry = {
+            "analysis": final_raw.get("analysis", "Direct QA execution"),
+            "answer":   answer_text,
+            "success":  final_raw.get("success", "Yes"),
+            "rating":   final_raw.get("rating",  8),
+            "is_error": final_raw.get("is_error", False),
         }
-        
-        # Create a "pseudo-plan-execution" record for compatibility
-        simulated_exp = {
-            "original_question": question,
-            "plan": ["Direct QA"],
-            "step_question": [{"type": "question-answering", "task": "Direct QA"}],
-            "step_output": [simulated_step_output],
-            "step_docs_ids": [doc_ids],
-            "step_notes": [result.get("notes", [])],
-            "plan_summary": {
-                "output": "Successful", 
-                "answer": answer_text, 
-                "score": 10,
-                "cited_pmids": doc_ids # Critical for citation preservation
-            },
-            "stop": True,
-            "intent": state.get("intent"),
-            "risk_level": state.get("risk_level"),
-            "needs_guidelines": state.get("needs_guidelines"),
-            "requires_disclaimer": state.get("requires_disclaimer")
-        }
-        
+
+        logger.info(
+            f"Direct QA complete | "
+            f"answer='{answer_text[:100]}...' | "
+            f"docs={len(doc_ids)}"
+        )
+
+        # IMPORTANT: do NOT write to past_exp.
+        # past_exp is the planner's retry memory. Writing a fake 'Direct QA'
+        # entry would cause PlannerAgent._format_memory() to believe a full
+        # plan was attempted and succeeded, making retry plans incoherent.
         return {
-            "final_answer": answer_text,
-            "past_exp": [simulated_exp]
+            "final_answer":  answer_text,
+            "step_output":   [step_output_entry],
+            "step_docs_ids": doc_ids,
+            "step_notes":    result.get("notes", []),
         }
-        
+
     except Exception as e:
-        logger.error(f"RagNode Failed: {e}")
+        logger.error(f"rag_direct_node failed: {e}", exc_info=True)
         return {
-            "final_answer": "I encountered an error during direct search.",
-            "past_exp": []
+            "final_answer":  "I encountered an error during direct search.",
+            "step_output":   [{
+                "answer":   "Error in direct QA path.",
+                "success":  "No",
+                "is_error": True,
+                "error_message": str(e),
+            }],
+            "step_docs_ids": [],
+            "step_notes":    [],
         }

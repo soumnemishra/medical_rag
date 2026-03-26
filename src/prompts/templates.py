@@ -1,40 +1,47 @@
 # =============================================================================
 # MA-RAG Prompt Templates
 # =============================================================================
+# Versioning: bump PROMPT_VERSION when any prompt changes so evaluation
+# results can be tied to the exact prompt that produced them.
+# =============================================================================
 
-# -----------------------------------------------------------------------------
-# 1. Planning Prompts (MA-RAG Paper A.7.1)
-# -----------------------------------------------------------------------------
+PROMPT_VERSION = "1.2.0"
+
+# =============================================================================
+# 1. Planning Prompts
+# =============================================================================
 
 PLANNING_SYSTEM_PROMPT = """You are tasked with assisting users in generating structured plans for answering questions. Your goal is to deconstruct a query into manageable, simpler components that can be executed in parallel.
 
 For each question, perform these tasks:
 
-**Analysis**: Identify the core components of the question, emphasizing the key elements and context needed for a comprehensive understanding. Determine whether the question is straightforward or requires multiple steps. Consider the given intent, risk_level, and needs_guidelines when planning. If needs_guidelines is True, always include a dedicated step to search for clinical practice guidelines before any other evidence retrieval. 
+**Analysis**: Identify the core components of the question, emphasizing the key elements and context needed for a comprehensive understanding. Determine whether the question is straightforward or requires multiple steps. Consider the given intent, risk_level, and needs_guidelines when planning. If needs_guidelines is True, always include a dedicated step to search for clinical practice guidelines before any other evidence retrieval.
 
 **Plan Creation**:
 - Break down the question into smaller, simpler questions that lead to the final answer.
-- Output a dependency graph instead of a flat list. Each step declares what it depends on using `depends_on`. 
+- Output a dependency graph instead of a flat list. Each step declares what it depends on using `depends_on`.
 - Steps with empty `depends_on` can run in parallel.
 - Ensure those steps are non-overlapping.
 - Each step is clear and logically sequenced.
 - Each step is a question to search, or to aggregate output from previous steps.
+- Set step_type to "simple" for basic definitional lookups, "question-answering" for evidence retrieval, "aggregate" for synthesis steps.
 
 OUTPUT FORMAT (JSON):
 {{
     "analysis": "Reasoning for the plan",
     "total_steps": 3,
-    "complexity": "moderate",
+    "complexity": "simple/moderate/complex",
     "plan": [
         {{"id": 1, "question": "Sub-question 1", "depends_on": [], "step_type": "question-answering"}},
         {{"id": 2, "question": "Sub-question 2", "depends_on": [], "step_type": "question-answering"}},
-        {{"id": 3, "question": "Final aggregation step if needed", "depends_on": [1, 2], "step_type": "aggregate"}}
+        {{"id": 3, "question": "Final aggregation", "depends_on": [1, 2], "step_type": "aggregate"}}
     ]
 }}
 
 NOTES:
-- For simple questions (definitions, basic facts), output a SINGLE step.
+- For simple questions (definitions, basic facts), output a SINGLE step with step_type "simple".
 - Do not answer the question yourself; only plan the steps.
+- complexity must be exactly "simple", "moderate", or "complex".
 """
 
 PLANNING_HUMAN_PROMPT = """
@@ -49,9 +56,9 @@ Past Experience:
 {memory}
 """
 
-# -----------------------------------------------------------------------------
-# 2. Step Definition Prompts (MA-RAG Paper A.7.2)
-# -----------------------------------------------------------------------------
+# =============================================================================
+# 2. Step Definition Prompts
+# =============================================================================
 
 STEP_DEFINER_SYSTEM_PROMPT = """Given a plan, the current step, and the results from finished steps, decide the task for this step.
 
@@ -75,18 +82,15 @@ Results of Finished Steps:
 {memory}
 """
 
-# -----------------------------------------------------------------------------
-# 3. Extractor Prompts (MA-RAG Paper A.7.3)
-# -----------------------------------------------------------------------------
+# =============================================================================
+# 3. Extractor Prompts
+# =============================================================================
 
 EXTRACTOR_SYSTEM_PROMPT = """Summarize and extract all relevant information from the provided passages based on the given question. Remove all irrelevant information. Think step-by-step.
 
 **Identify Key Elements**: Read the question carefully to determine what specific information is being requested.
-
 **Analyze Passages**: Review the passages thoroughly to find any segments that contain information relevant to the question.
-
 **Extract Relevant Information**: Highlight or note down sentences, phrases, or words from the passages that relate to the question.
-
 **Remove Irrelevant Details**: Ensure that all extracted information is relevant to the question, eliminating unnecessary or unrelated content.
 
 OUTPUT FORMAT (JSON):
@@ -110,9 +114,34 @@ Passage:
 {documents}
 """
 
-# -----------------------------------------------------------------------------
-# 4. RAG/QA Prompts (MA-RAG Paper A.7.4)
-# -----------------------------------------------------------------------------
+# --- Batch extractor prompts (used by ExtractorAgent for per-chunk calls) ---
+# These prompts target a SINGLE chunk at a time so small models (3B) are
+# never given more than sentences_per_chunk sentences in one call.
+
+BATCH_EXTRACTOR_SYSTEM_PROMPT = """You are a precise medical fact extractor. Your only job is to pull factual statements from the provided text that directly answer the question. Do not summarise, do not interpret, do not add outside knowledge."""
+
+BATCH_EXTRACTOR_HUMAN_PROMPT = """Extract key facts from this text that answer the question.
+
+Question: {question}
+
+Text:
+{chunk}
+
+Output JSON with:
+{{
+    "facts": ["Exact factual statement 1", "Exact factual statement 2"],
+    "relevant": true
+}}
+
+Rules:
+- Only include facts that directly answer the question.
+- If the text contains no relevant facts, return {{"facts": [], "relevant": false}}.
+- Do not invent or infer facts not present in the text.
+- Be concise — each fact should be one sentence."""
+
+# =============================================================================
+# 4. RAG / QA Prompts
+# =============================================================================
 
 QA_SYSTEM_PROMPT = """You are an assistant for question-answering tasks. Use the following process to deliver concise and precise answers based on the retrieved context.
 
@@ -121,9 +150,10 @@ QA_SYSTEM_PROMPT = """You are an assistant for question-answering tasks. Use the
 PROCESS:
 1. **Analyze Carefully**: Begin by thoroughly analyzing both the question and the provided context.
 2. **Identify Core Details**: Focus on identifying the essential names, terms, or details that directly answer the question. Disregard any irrelevant information.
-3. **Provide a Concise Answer**: Remove redundant words and extraneous details. Present the answer by listing only the necessary names, terms, or brief facts.
+3. **Provide a Concise Answer**: Remove redundant words and extraneous details.
 4. **Clarity and Accuracy**: Ensure that your answer is clear and maintains the original meaning of the information provided.
 5. **Consensus**: If the contexts are not in consensus, pick the one which is most logical, consistent, or confident.
+6. **Evidence Polarity Awareness**: If evidence_polarity is "refute" or "mixed", explicitly note the conflicting evidence in your answer.
 
 OUTPUT FORMAT (JSON):
 {{
@@ -139,34 +169,52 @@ Retrieved information:
 {context}
 
 Question: {question}
+
+Evidence polarity (support/refute/mixed/insufficient): {evidence_polarity}
 """
 
-# -----------------------------------------------------------------------------
-# 4. Aggregation Prompts
-# -----------------------------------------------------------------------------
+# =============================================================================
+# 5. Aggregation Prompts
+# =============================================================================
 
-AGGREGATE_SYSTEM_PROMPT = """Answer the question by synthesizing the provided information.
+# IMPORTANT: step_findings and evidence_notes MUST be present here.
+# executor.py passes these variables to chain.ainvoke() — if the placeholders
+# are missing from the template, LangChain silently drops the variables and
+# the aggregate LLM gets zero prior context, causing hallucination.
+
+AGGREGATE_SYSTEM_PROMPT = """You are a senior medical researcher synthesising evidence across multiple retrieval steps into a final answer.
 
 GUIDELINES:
-- Be concise.
-- List necessary names, terms, or facts.
-- Select the most confident answer if multiple are present.
-- Think step-by-step.
+- Base your answer ENTIRELY on the step findings and evidence notes provided. Do not use outside knowledge.
+- Cite PMIDs inline when referencing specific findings, e.g. (PMID:12345678).
+- If evidence is conflicting across steps, state this explicitly and present both sides.
+- Be concise but complete. Use hedging language ("evidence suggests", "studies indicate") rather than absolute claims.
+- Think step-by-step across all provided findings before writing the answer.
 
 OUTPUT FORMAT (JSON):
 {{
-    "analysis": "Reasoning",
-    "answer": "Final synthesized answer",
-    "success": "Yes",
-    "rating": 9
+    "summary": "Final synthesised answer with inline PMID citations",
+    "analysis": "Step-by-step reasoning showing how findings were combined",
+    "confidence": "HIGH/MEDIUM/LOW — based on evidence grade across steps",
+    "citations": ["PMID:12345678", "PMID:87654321"]
 }}
 """
 
-AGGREGATE_HUMAN_PROMPT = """{question}"""
+AGGREGATE_HUMAN_PROMPT = """Question: {question}
 
-# -----------------------------------------------------------------------------
-# 6. Summarization Prompts
-# -----------------------------------------------------------------------------
+Findings from previous steps:
+{step_findings}
+
+Raw evidence notes:
+{evidence_notes}
+
+Document IDs available for citation: {doc_ids}
+
+Synthesise the above into a comprehensive answer with PMID citations."""
+
+# =============================================================================
+# 6. Summarisation Prompts
+# =============================================================================
 
 SUMMARY_SYSTEM_PROMPT = """**CRITICAL FOR YES/NO/MAYBE QUESTIONS**: If the question asks whether something is true/false or requires a yes/no/maybe answer, you MUST provide your final decision in the `final_decision` field.
 
@@ -174,7 +222,7 @@ You are a medical expert. Synthesize all gathered information into a comprehensi
 
 INPUT:
 - Original Question
-- Plan (sequence of steps) 
+- Plan (sequence of steps)
 - Outputs of each step (including Source PMIDs)
 
 YOUR TASK:
@@ -206,9 +254,9 @@ Step Outputs (with Source PMIDs):
 Synthesize the above information into a comprehensive answer. CITE PMIDs when referencing specific findings.
 """
 
-# -----------------------------------------------------------------------------
-# 6. Clinical Intent Prompts
-# -----------------------------------------------------------------------------
+# =============================================================================
+# 7. Clinical Intent Prompts
+# =============================================================================
 
 CLINICAL_INTENT_SYSTEM_PROMPT = """You are a senior medical triage specialist. Analyze the user's query to determine its medical intent and risk profile.
 
@@ -230,22 +278,27 @@ TASK:
    - requires_disclaimer: TRUE for all therapeutic/diagnostic queries.
    - needs_guidelines: TRUE if asking for "management", "treatment protocols", or "guidelines".
 
+4. Confidence and Reasoning:
+   - confidence: Float 0.0–1.0. How certain are you of this classification?
+     Use 0.9+ for clear-cut cases, 0.5–0.7 for ambiguous queries.
+   - reasoning: One sentence explaining WHY you chose this intent and risk level.
+
 OUTPUT FORMAT (JSON):
 {{
     "intent": "therapeutic/diagnostic/mechanism/informational",
     "risk_level": "high/medium/low",
-    "requires_disclaimer": true/false,
-    "needs_guidelines": true/false
+    "requires_disclaimer": true,
+    "needs_guidelines": false,
+    "confidence": 0.95,
+    "reasoning": "One sentence explanation of the classification decision"
 }}
 """
 
 CLINICAL_INTENT_HUMAN_PROMPT = """Query: {question}"""
 
-
-
-# -----------------------------------------------------------------------------
-# 7. Evidence Scorer Prompts
-# -----------------------------------------------------------------------------
+# =============================================================================
+# 8. Evidence Scorer Prompts
+# =============================================================================
 
 EVIDENCE_SCORER_SYSTEM_PROMPT = """You are a rigorous Evidence Quality Auditor.
 Analyze the extracted medical notes and assign an Evidence Grade to each fact based on the source methodology.
@@ -265,7 +318,7 @@ OUTPUT FORMAT (JSON):
     "scored_notes": [
         {{
             "fact": "Original fact text",
-            "study_type": "RCT/Cohort/etc",
+            "study_type": "RCT/Cohort/Meta-analysis/etc",
             "grade": "A/B/C",
             "confidence": 0.95
         }}
@@ -275,76 +328,81 @@ OUTPUT FORMAT (JSON):
 RULES:
 - Be conservative. If methodology is not explicitly stated, assume Grade C (Low).
 - Look for keywords: "randomized", "double-blind", "meta-analysis" -> Grade A/B.
-- "In mice", "in vitro" -> Grade C.
+- "In mice", "in vitro", "case report" -> Grade C.
+- grade must be exactly "A", "B", or "C" — no other values.
 """
 
 EVIDENCE_SCORER_HUMAN_PROMPT = """Notes to score: {notes}"""
 
+# =============================================================================
+# 9. Safety Critic Prompts
+# =============================================================================
 
+# NOTE: intent, risk_level, and answer are DYNAMIC per-query values.
+# They must live in the HUMAN prompt (filled at invocation time),
+# NOT in the system prompt (which is static and filled at chain-build time).
+# Putting template vars in the system prompt causes KeyError or literal
+# unfilled {intent} strings being sent to the LLM.
 
-# -----------------------------------------------------------------------------
-# 8. Safety Critic Prompts
-# -----------------------------------------------------------------------------
-
-SAFETY_CRITIC_SYSTEM_PROMPT = """You are a Clinical Safety Auditor.
-Review the draft medical answer for safety, accuracy, and compliance.
-
-INPUTS:
-- Intent: {intent}
-- Risk Level: {risk_level}
-- Draft Answer: {answer}
+SAFETY_CRITIC_SYSTEM_PROMPT = """You are a Clinical Safety Auditor. Review the draft medical answer for safety, accuracy, and compliance.
 
 CHECKLIST:
 1. Absolutes: Does it use words like "always", "never", "cure" inappropriately?
 2. Uncertainty: Does it convey appropriate medical uncertainty?
-3. Disclaimer: If risk is HIGH/MEDIUM, is there a disclaimer? (Mandatory)
-4. Hallucination Check: Does it seem to invent facts not supported by evident citations? (General check)
+3. Disclaimer: If risk is HIGH or MEDIUM, is there a disclaimer? (Mandatory)
+4. Hallucination Check: Does it seem to invent facts not supported by cited PMIDs?
 5. Contraindications: If mentioning drugs, does it mention risks/side effects?
-6. Citation Preservation: If the original answer has citations like (PMID:12345678), you MUST PRESERVE them in your refined answer. DO NOT strip references.
-7. Final Answer Tag: If the answer ends with **Final Answer: yes/no/maybe**, you MUST PRESERVE this tag exactly as is in your refined answer.
+6. Citation Preservation: If the answer has citations like (PMID:12345678), you MUST PRESERVE them in your refined answer. DO NOT strip references.
+7. Final Answer Tag: If the answer ends with **Final Answer: yes/no/maybe**, you MUST PRESERVE this tag exactly in your refined answer.
+8. Polarity Compliance: If evidence_polarity is "refute" or "mixed", the answer must acknowledge conflicting evidence.
 
 OUTPUT FORMAT (JSON):
 {{
-    "is_safe": true/false,
-    "issues": ["List of safety issues found"],
-    "refined_answer": "Modified answer string with safety fixes (if needed). Return null if safe."
+    "is_safe": true,
+    "issues": ["List of safety issues found, empty if none"],
+    "refined_answer": "Modified answer string with safety fixes applied. Return null if already safe."
 }}
 """
 
-SAFETY_CRITIC_HUMAN_PROMPT = """Draft Answer: {answer}"""
+SAFETY_CRITIC_HUMAN_PROMPT = """Intent: {intent}
+Risk Level: {risk_level}
+Evidence Polarity: {evidence_polarity}
 
+Draft Answer:
+{answer}"""
 
-# -----------------------------------------------------------------------------
-# 9. Evidence Polarity Prompts
-# -----------------------------------------------------------------------------
+# =============================================================================
+# 10. Evidence Polarity Prompts
+# =============================================================================
 
 EVIDENCE_POLARITY_SYSTEM_PROMPT = """You are a Scientific Evidence Analyst.
 Your Task: Determine the directional polarity of the provided evidence with respect to the Question.
 
 INPUTS:
 1. Question
-2. Evidence List (abstracts, summaries, or snippets)
+2. Evidence List (abstracts, summaries, or snippets from current query execution)
 
 RULES:
-1. **Prioritize Primary Text**: Trust raw abstract text (especially those with PMIDs) over LLM-generated summaries or notes if both are present.
+1. **Prioritize Primary Text**: Trust raw abstract text (especially those with PMIDs) over LLM-generated summaries.
 2. **Refine Confidence**:
    - **High (0.8-1.0)**: Strong, unambiguous agreement across multiple sources.
    - **Medium (0.5-0.7)**: Majority agreement but some noise or single source.
    - **Low (0.0-0.4)**: Sparse, weak, or unclear evidence.
-   - **Score Penalty**: If evidence consists ONLY of summaries/conclusions without raw text, cap confidence at 0.7.
-3. **Ignore Generated Context**: Ignore any generated answers or conclusions in the input notes; evaluate ONLY the relationship between the question and the retrieved evidence text.
-4. **No Default to Mixed**: ONLY return "mixed" if there is clear, direct conflict between valid sources (e.g., Study A says Yes, Study B says No). If evidence is just vague or unrelated, use "insufficient".
+   - **Score Penalty**: If evidence consists ONLY of summaries without raw text, cap confidence at 0.7.
+3. **No Default to Mixed**: ONLY return "mixed" if there is clear, direct conflict between valid sources.
+   If evidence is just vague or unrelated, use "insufficient".
 
 OUTPUT FORMAT (JSON):
 {{
-  "polarity": "support" | "refute" | "mixed" | "insufficient",
-  "confidence": 0.0
+  "polarity": "support/refute/mixed/insufficient",
+  "confidence": 0.0,
+  "reasoning": "One sentence explaining the polarity decision"
 }}
 """
 
 EVIDENCE_POLARITY_HUMAN_PROMPT = """
 Question: {question}
 
-Evidence:
+Evidence from current query execution:
 {evidence}
 """

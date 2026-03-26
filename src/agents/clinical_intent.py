@@ -1,45 +1,13 @@
-# ClinicalIntentAgent decides what kind of medical question this is 
-# and how risky it is, before any retrieval or generation happens.
-#This is not an answer-generation agent.
-#It is a control + safety + routing agent.
-
-'''2️ Why this agent exists (architectural reason)
-
-In medical RAG systems, you cannot treat all queries equally.
-
-Example:
-
-“What is diabetes?” → safe, informational
-
- “Can I stop taking insulin?” → high risk, clinical
-
- “I have chest pain right now” → emergency
-
- So this agent answers:
-
-Is this safe to answer normally?
-
-Do we need disclaimers?
-
-Do we need clinical guidelines?
-
-Should downstream agents be restricted?
-
-That’s why your docstring says:
-
-“This is the first gate in the Clinical-Grade pipeline.”'''
-
-
 ###################################### tools that we will be using ############################
 from typing import Dict, Any  #python way of saying this is dict 
 from langchain_core.prompts import ChatPromptTemplate # a template for talking to ai 
-from langchain_core.output_parsers import JsonOutputParser #makes ai to give clean answer 
+from langchain_core.output_parsers import JsonOutputParser #makes ai to give clean  structure answer 
 #the graph state is the shared note book 
-from src.state.state import GraphState, ClinicalIntentFormat #this is the shared memory accross the agents 
+from src.state.state import GraphState, ClinicalIntentFormat #this is the shared memory accross the agents  and each agent read from this file 
 from src.prompts.templates import CLINICAL_INTENT_SYSTEM_PROMPT, CLINICAL_INTENT_HUMAN_PROMPT #this contain actual instrcutions 
 from src.core.registry import ModelRegistry #the warehouse that holds the model 
 import logging #for keeping records of what happened 
-from tenacity import retry, stop_after_attempt, wait_fixed
+from tenacity import retry, stop_after_attempt, wait_fixed  # this basically solves api timeout etc 
 
 logger = logging.getLogger(__name__)
 

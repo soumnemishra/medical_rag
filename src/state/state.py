@@ -1,105 +1,82 @@
-
-
-# the state.py is the nervous system of the multiagent rag system 
-# in langraph the state is the shared system that every agent in the pipeline read and writes to 
-# so if the state is messy then agent work flow is messed up 
-
-'''think of the system like  the medical team sititng to solve a given questions
----> example 
--------------> can  "Can Metformin reduce cancer risk in diabetic patients?
-my sysytem contains multiple agents 
-all these agent share memory and the shared memory is called the state 
-so the state.py define the strucutre of the ssytem memory 
-
-########### so the state.py is the database schema of your system #####
-# 
-# if this is bad then system becomes chaotic '''
-
-
-
-###############################  Discussing ################## import modules #############
-'''list --> means to store doc_1 doc_2 doc_3
-used for doc_ids
-documents  plan steps notes etc 
-
-
-############ Typed _dict____#########
-# if python the dictionaries doesnot have a strcuture 
-# so for example user{
-# 'name': 'soumen', 'age': 25}
-# if some one wanted to change the age like user['age']='twenty four"
-# 
-# now the age becomes a string the python doesnot complain the thing break silenty
-# type dicts is like a structure form 
-# 
-# what inputs should be there or llm should expects 
-# 
-# why langraph use the type dict 
-# 
-# because the langraph requires the state object to be dictionaries '''
-
-
 from typing import List, Annotated, Optional, TypedDict, Literal, Dict, Any
 import operator
 from pydantic import BaseModel, Field
 
 # =============================================================================
-# Data Models (Pydantic)
-# return the json format matching this schema 
-#field()  provide additional description 
+# Pydantic Models — LLM output validation
 # =============================================================================
-#these classes are inherits from the base model that instructs / forces the llm to return data in a specific JSON format.
-class QAAnswerFormat(BaseModel):
-    #this forces the llm to provide the chain of thought so we can see what analysis the llm made 
-    analysis: str = Field(description="Your thoughts, analysis about the question and context. Think step-by-step")
-    answer: str = Field(description="The answer for the question") #this provdes the final answer 
+# Pydantic: validates LLM JSON output at runtime. The LLM speaks messy text;
+# Pydantic enforces that it fills out a structured form correctly.
+#
+# TypedDict: defines the structure of the shared state dictionaries that
+# agents read/write. Lightweight — LangGraph updates state many times per
+# query; Pydantic validation on every update would be too slow.
+#
+# Pipeline:
+#   LLM text → Pydantic (validate) → dict → TypedDict state (store)
+# =============================================================================
 
-    # a simple yes or no string . This is the grounding check can the mode find the answer in the pub med abstracts
-    success: str = Field(description="Binary output (Yes or No), indicate if you can answer or not")
-    # this is the self reported confidence score . It can use for the model caliberation 
-    rating: int = Field(default=None, description="Confidence rating 0-10. More evidence = higher score")
+class QAAnswerFormat(BaseModel):
+    analysis: str = Field(description="Chain-of-thought reasoning about the question and context")
+    answer:   str = Field(description="The final answer")
+    success:  str = Field(description="Yes or No — can the question be answered from the evidence?")
+    rating:   int = Field(default=0, description="Confidence 0–10. More/better evidence = higher score")
 
 class PlanStep(BaseModel):
-    id: int
-    question: str
-    depends_on: List[int] = []
-    step_type: str = "question-answering"  # or "aggregate"
+    """Single step in an execution plan. id and depends_on enable parallel execution."""
+    id:         int      = Field(description="Unique step identifier")
+    question:   str      = Field(description="The sub-question for this step")
+    depends_on: List[int] = Field(default_factory=list, description="IDs of steps that must complete first")
+    step_type:  str      = Field(default="question-answering", description="question-answering | aggregate | simple")
 
 class PlanFormat(BaseModel):
-    plan: List[PlanStep]
-    total_steps: int
-    complexity: str  # "simple" | "moderate" | "complex"
+    """Full plan output from PlannerAgent."""
+    plan:        List[PlanStep] = Field(description="Ordered list of plan steps")
+    total_steps: int            = Field(description="Total number of steps")
+    complexity:  str            = Field(description="simple | moderate | complex")
 
 class StepTaskFormat(BaseModel):
-    # this is used by the step definer . It labels task as the aggregate (summarizing what we know 
-    #or question answering (needs new pub med search))
-    type: str = Field(description="Type of task: 'aggregate' or 'question-answering'")
-    task: str = Field(description="The detailed task to do in this step")
+    type: str = Field(description="aggregate or question-answering")
+    task: str = Field(description="Detailed query for this step")
 
-class PlanSummaryFormat(BaseModel): 
-    output: str = Field(description="Your output summary, follow the format")
-    answer: str = Field(description="Final answer for the question")
-    score: int = Field(description="Confidence score")
+class PlanSummaryFormat(BaseModel):
+    output: str = Field(description="Successful or Failed")
+    answer: str = Field(description="Final synthesised answer with citations")
+    score:  int = Field(description="Confidence score 0–10")
 
 class ClinicalIntentFormat(BaseModel):
-    #categories of the query 
-    intent: str = Field(description="Primary intent: 'informational', 'diagnostic', 'therapeutic', 'mechanism'")
-    risk_level: str = Field(description="Risk level: 'low', 'medium', 'high'")
-    requires_disclaimer: bool = Field(description="Whether a disclaimer is mandatory")
-    needs_guidelines: bool = Field(description="Whether clinical guidelines are required")
-    confidence: float = Field(ge=0.0, le=1.0, description="0.0=uncertain, 1.0=certain")
-    reasoning: str = Field(description="One sentence explanation of classification")
+    intent:              str   = Field(description="informational | diagnostic | therapeutic | mechanism")
+    risk_level:          str   = Field(description="low | medium | high")
+    requires_disclaimer: bool  = Field(description="Mandatory for therapeutic/diagnostic queries")
+    needs_guidelines:    bool  = Field(description="True if guidelines are required")
+    confidence:          float = Field(ge=0.0, le=1.0, description="Classification certainty 0.0–1.0")
+    reasoning:           str   = Field(description="One sentence explanation of the classification")
+
+class EvidencePolarity(BaseModel):
+    """
+    Pydantic model — NOT TypedDict — because it is used as:
+        JsonOutputParser(pydantic_object=EvidencePolarity)
+    JsonOutputParser requires a Pydantic BaseModel subclass.
+    A TypedDict here raises TypeError at agent initialisation.
+    """
+    polarity:   str   = Field(default="insufficient",
+                              description="support | refute | mixed | insufficient")
+    confidence: float = Field(default=0.0, description="0.0–1.0")
+    reasoning:  str   = Field(default="", description="One sentence explanation")
+
+    def to_dict(self) -> dict:
+        return {"polarity": self.polarity, "confidence": self.confidence, "reasoning": self.reasoning}
 
 
 # =============================================================================
-# State Definitions (TypedDict)
+# State TypedDicts — shared memory between agents
 # =============================================================================
 
 class QAAnswerState(TypedDict):
     analysis: str
-    answer: str
-    success: str
-    rating: int
+    answer:   str
+    success:  str
+    rating:   int
 
 class StepTaskState(TypedDict):
     type: str
@@ -108,191 +85,126 @@ class StepTaskState(TypedDict):
 class PlanSummaryState(TypedDict):
     output: str
     answer: str
-    score: int
-
-# class ClinicalIntentState(TypedDict):
-#     intent: str
-#     risk_level: str
-#     requires_disclaimer: bool
-#     needs_guidelines: bool
+    score:  int
 
 class ClinicalIntentState(TypedDict):
-    intent: str
-    risk_level: str
+    intent:              str
+    risk_level:          str
     requires_disclaimer: bool
-    needs_guidelines: bool
-    confidence: float
-    reasoning: str
-
+    needs_guidelines:    bool
+    confidence:          float
+    reasoning:           str
 
 class RouterOutput(TypedDict):
-    """
-    Output schema for the RouterAgent.
-    Defines the execution mode and resource contracts.
-    """
-    execution_mode: Literal[
-        "direct_qa",        # Simple, single-hop, binary (Fastest)
-        "disambiguation",   # Ambiguous but single-hop (Medium)
-        "multihop"          # Complex, multi-step reasoning (Slowest)
-    ]
-    
-    # Capability Flags
-    requires_planning: bool
-    requires_extraction: bool
-    requires_evidence_grading: bool # Declarative (v1)
+    execution_mode:            Literal["direct_qa", "disambiguation", "multihop"]
+    requires_planning:         bool
+    requires_extraction:       bool
+    requires_evidence_grading: bool
+    answer_policy:             Dict[str, Any]
+    execution_budget:          Optional[Dict[str, int]]
 
-    # Policy
-    answer_policy: Dict[str, Any]
-    
-    # Budget (Declarative)
-    execution_budget: Optional[Dict[str, int]]
 
-###########  the plan state and rag state are the two nested states 
-
-#the rag stste is the nested state it is the temporary work space when one agent 
-# looks for a specific looking for an answer to a single sub-question, 
-# it uses this state, then throws it away once the result is moved to the GraphState.
 class RagState(TypedDict):
-    """
-    State for RAG execution on a single query.
-    """
-    question: str
-    documents: List[str] # Optional: Pre-fetched docs/notes
-    doc_ids: List[str]
-    notes: List[str]
-    final_raw_answer: QAAnswerState  # Changed from Pydantic to TypedDict
-    intent: str
-    risk_level: str
-    safety_flags: List[str]
+    """Temporary state for a single RAG execution (one step or direct QA)."""
+    question:         str
+    documents:        List[str]
+    doc_ids:          List[str]
+    notes:            List[str]
+    final_raw_answer: QAAnswerState
+    intent:           str
+    risk_level:       str
+    safety_flags:     List[str]
+    # evidence_polarity passed through so QA_HUMAN_PROMPT {evidence_polarity}
+    # placeholder is filled — without this field RagAgent raises KeyError
+    evidence_polarity: Dict[str, Any]
 
-# the plan state is used when the system is breaking big question into the small steps 
-#it track docs id(pmids) so that at the end it can have we can have a full biography 
+
 class PlanExecState(TypedDict):
     """
-    State for the nested Plan Executor Graph.
-    Manages the execution of a single plan (sequence of steps).
+    State for the nested Plan Executor Graph (executor.py).
+    Lives only during plan execution — discarded afterwards.
     """
-    original_question: str
-    plan: List[str]  # The plan to follow
-    step_question: Annotated[List[StepTaskState], operator.add]  # List of sub-tasks
-    #this mean dont overwrite old results append new ones 
-    step_output: Annotated[List[QAAnswerState], operator.add]    # Output of each sub-task
-    step_docs_ids: Annotated[List[List[str]], operator.add]      # Retrieved Doc IDs per step
-    step_notes: Annotated[List[List[str]], operator.add]         # Notes per step
-    plan_summary: PlanSummaryState                               # Final summary of this plan
-    stop: bool  # Note: Default values not supported in TypedDict - must be set explicitly
-    
-    # Clinical Context passed down from GraphState
-    intent: str
-    risk_level: str
-    needs_guidelines: bool
+    original_question:  str
+    # List[Any] supports both old List[str] and new List[Dict] step formats
+    plan:               List[Any]
+    step_question:      Annotated[List[StepTaskState],  operator.add]
+    step_output:        Annotated[List[QAAnswerState],  operator.add]
+    step_docs_ids:      Annotated[List[List[str]],      operator.add]
+    # FIXED: flat List[str] — was List[List[str]] which created ragged nesting.
+    # executor.py returns {"step_notes": ["text"]} (List[str]);
+    # operator.add appends correctly to Annotated[List[str], operator.add].
+    step_notes:         Annotated[List[str],            operator.add]
+    plan_summary:       PlanSummaryState
+    stop:               bool
+    # Clinical context passed down from GraphState
+    intent:             str
+    risk_level:         str
+    needs_guidelines:   bool
     requires_disclaimer: bool
 
-class EvidencePolarity(TypedDict):
-    polarity: Literal["support", "refute", "mixed", "insufficient"]
-    confidence: float
 
-# this is the global state ##################################################################
-# this is the main state/ master file  of the system that remains open through out the process
 class GraphState(TypedDict):
     """
-    Main Global State for the MA-RAG process.
-    Manages the high-level loop of Planning -> Execution -> Comparison.
+    Master shared state — the 'shared notebook' every agent reads and writes.
+
+    Fields are grouped by which agent writes them:
+      ClinicalIntentAgent → intent, risk_level, requires_disclaimer,
+                            needs_guidelines, confidence, reasoning, safety_flags
+      RouterAgent         → router_output
+      PlannerAgent        → plan, plan_complexity, plan_error
+      ExecutorWrapper     → past_exp, final_answer,
+                            step_output, step_docs_ids, step_notes
+      RagDirectNode       → final_answer, step_output, step_docs_ids, step_notes
+      EvidencePolarityAgent → evidence_polarity
+      EvidenceDecisionAgent → evidence_decision, retry_count
+      SupplementalRetrieval → current_documents, current_doc_ids
+      DecisionAlignment   → final_answer (may modify), safety_flags
+      SafetyCritic        → final_answer (may refine), safety_flags
     """
+    # ── Core query ──────────────────────────────────────────────────
     original_question: str
-    plan: List[str] 
-    #operator.add is the memory list instead of overwriting the old thoughts it keep history 
-    #his is vital for Agentic Reasoning—the system can look back and say, "Plan A didn't work, let's try Plan B."
-    past_exp: Annotated[List[PlanExecState], operator.add]       # History of past plan executions
-    final_answer: str
-    intent: str
-    risk_level: str
-    safety_flags: List[str]
+
+    # ── Plan ────────────────────────────────────────────────────────
+    # List[Any]: supports both List[str] (legacy) and List[Dict] (updated planner)
+    plan:             List[Any]
+    plan_complexity:  str                  # "simple" | "moderate" | "complex"
+    plan_error:       Optional[str]        # non-None when planner fails
+
+    # ── Execution history ────────────────────────────────────────────
+    # Accumulates across retries — PlannerAgent reads this for retry learning
+    past_exp:         Annotated[List[Dict[str, Any]], operator.add]
+    final_answer:     str
+
+    # ── Current execution step data (surfaced from executor / rag_direct) ──
+    # EvidencePolarityAgent and DecisionAlignmentAgent read these directly
+    # from GraphState — they must exist here, not only inside past_exp
+    step_output:      List[Dict[str, Any]]
+    step_docs_ids:    List[Any]
+    step_notes:       List[str]
+
+    # ── Clinical intent classification ───────────────────────────────
+    intent:              str
+    risk_level:          str
     requires_disclaimer: bool
-    needs_guidelines: bool
-    confidence: float
-    reasoning: str
-    #this descides the speed of the system whether the question goes to the direct qa or complex qa
-    router_output: RouterOutput # Output from RouterAgent
-    evaluation_mode: bool # If True, SafetyCritic preserves unsafe answers (for benchmarking)
-    #addition for a medical paper. It tracks if the evidence 
-    # "supports" or "refutes" the query. Medical research is rarely 100% "yes," 
-    # so having mixed or insufficient as options adds high clinical value.
-    evidence_polarity: EvidencePolarity # [NEW] Directional polarity of evidence
-    evidence_decision: Literal["accept", "reretrieve_diverse", "reretrieve_counter"] # [NEW] Decision on evidence quality
-    retry_count: int # [NEW] Number of retries attempted
-    current_documents: List[str] # [NEW] Context for re-retrieval injection
-    current_doc_ids: List[str] # [NEW] PMIDs for re-retrieval injection
+    needs_guidelines:    bool
+    confidence:          float   # from ClinicalIntentAgent
+    reasoning:           str     # from ClinicalIntentAgent
 
+    # ── Routing ─────────────────────────────────────────────────────
+    router_output:    RouterOutput
 
+    # ── Evidence quality pipeline ────────────────────────────────────
+    evidence_polarity:  Dict[str, Any]   # {"polarity": str, "confidence": float, "reasoning": str}
+    evidence_decision:  Literal["accept", "reretrieve_diverse", "reretrieve_counter"]
+    retry_count:        int
 
-###########################  what the difference between the type dict and pydantic #########
-''' pdantic models comtmrolls the llm ouput format 
-type dict controlls system memory structure 
+    # ── Supplemental retrieval context ───────────────────────────────
+    current_documents:  List[str]
+    current_doc_ids:    List[str]
 
-so one is the communication between the llm and another
- one is communication between agents 
+    # ── Safety / audit ───────────────────────────────────────────────
+    safety_flags:       List[str]
 
-
-pydantic helps us to validate the structure data it validates the data at run time 
-
-so why pydantic helpful
-because llm outputs are messy text not a structure text 
-we force llm to produce output with a structure json
-
-
-typr dict cannot be used to validate the system out put 
-
-
-############# Type dict ###############
-# defines the structure of the dictionaries used in the system
-# type dict help the ide and devloper to understand the strcutre of the dictionaries
-# 
-
-###### why both used in this pydantic and the type dict #############
-Stage 1 : llm produce the structure output 
-example plananr produces a plan 
-pydantic ensure the structure 
-
-stage-2 : system stores results in the state : 
-the result is stored in the system memory 
-
-type dict define this meory structure 
-
-
-#why not to use only pydantic or typ dic 
-
-1) pydantic is too slow for system state 
---> langraph updates state many times per second 
-
-if every update used the pydantic validation then system becomes slow 
-type dict is a light weight 
-
-############# why not only use the typedict #############
-type dict cannot validate the llm output 
-
-it is the type hint 
-think of like 
-pydantic is the quality ispection department 
-and type dict is the warehouse storage system 
-
-LLM OUTPUT
-   ↓
-Pydantic Models
-   ↓
-Validated JSON
-   ↓
-Converted to Dict
-   ↓
-Stored in TypedDict States
-   ↓
-LangGraph Agents read/write
-
-pydantic is the run time validator where as type dict is the type hint 
-
-the real power of the system is not pydantic or type dict 
-it is this idea : 
-shared=memory  every agetns reads and write that turns the system from simple pipeline to 
-collaborative reasoning system 
-
-'''
+    # ── Evaluation ───────────────────────────────────────────────────
+    # When True, SafetyCritic preserves unsafe answers for benchmark scoring
+    evaluation_mode:    bool
