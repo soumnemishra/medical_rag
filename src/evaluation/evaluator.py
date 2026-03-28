@@ -27,6 +27,7 @@ import logging
 import os
 import re
 import time
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -61,6 +62,9 @@ class EvaluationResult:
     is_correct: bool
     raw_response: str = ""
     sources: List[str] = field(default_factory=list)
+    query_log: List[dict] = field(default_factory=list)
+    reasoning_steps: List[dict] = field(default_factory=list)
+    provider_used: Optional[str] = None
     latency_seconds: float = 0.0
     error: Optional[str] = None
     
@@ -73,8 +77,12 @@ class EvaluationResult:
             "predicted_answer": self.predicted_answer,
             "is_correct": self.is_correct,
             "sources": self.sources,
+            "provider_used": self.provider_used,
             "latency_seconds": round(self.latency_seconds, 2),
             "error": self.error,
+            "raw_llm_response": self.raw_response,
+            "query_log": self.query_log,
+            "reasoning_steps": self.reasoning_steps,
         }
 
 
@@ -167,9 +175,23 @@ class DatasetResults:
     
     def save(self, path: str) -> None:
         """Save results to JSON file."""
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(self.to_dict(), f, indent=2)
+        output_path = Path(path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = self.to_dict()
+
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            delete=False,
+            dir=str(output_path.parent),
+            suffix=".tmp",
+        ) as tmp_file:
+            json.dump(payload, tmp_file, indent=2)
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+            temp_path = Path(tmp_file.name)
+
+        temp_path.replace(output_path)
         logger.info(f"Results saved to {path}")
 
 
@@ -186,7 +208,7 @@ class PubMedQAEvaluator:
     
     # Universal Multiple-Choice Regex Patterns
     ANSWER_PATTERNS = [
-        r"(?:final\s+)?answer\s*(?:is|:)\s*[\"']?\b([A-Ea-e])\b[\"']?",
+        r"(?:final\s+)?answer\s*(?:is\s*:|is|:)\s*[\"']?\b([A-Ea-e])\b[\"']?",
         r"(?:my\s+)?(?:conclusion|verdict)\s*(?:is|:)\s*[\"']?\b([A-Ea-e])\b[\"']?",
         r"(?:the\s+)?(?:correct\s+)?(?:option|answer)\s*(?:is|would be|should be)\s*[\"']?\b([A-Ea-e])\b[\"']?",
         r"(?:i\s+)?(?:choose|select|pick)\s*(?:option\s*)?[\"']?\b([A-Ea-e])\b[\"']?",
@@ -195,24 +217,6 @@ class PubMedQAEvaluator:
         r"\[([A-Ea-e])\]",
         r"\*\*([A-Ea-e])\*\*",
     ]
-    
-    def extract_answer(self, response: str) -> str:
-        """
-        Extract A/B/C/D/E multiple choice answer from LLM response.
-        """
-        # Try each pattern in order of specificity
-        for pattern in self.ANSWER_PATTERNS:
-            matches = re.findall(pattern, response, re.IGNORECASE | re.MULTILINE)
-            if matches:
-                # Take the last match (often models put the final answer at the very end)
-                return matches[-1].strip().upper()
-        
-        logger.warning(
-            "Could not extract a letter answer from response",
-            extra={"response_preview": response[:200]}
-        )
-        return "UNKNOWN"
-
     def __init__(
         self,
         agent: Any,  # MedicalAgent type, using Any to avoid circular import
@@ -248,15 +252,43 @@ class PubMedQAEvaluator:
     
     def extract_answer(self, response: str) -> str:
         """
-        Extract A/B/C/D/E multiple choice answer from LLM response.
+        Strictly extract A/B/C/D/E multiple choice answer from LLM response.
         """
-        # Try each pattern in order of specificity
-        for pattern in self.ANSWER_PATTERNS:
-            matches = re.findall(pattern, response, re.IGNORECASE | re.MULTILINE)
+        response_upper = response.upper()
+
+        # Universal multiple-choice regex patterns.
+        patterns = [
+            r"(?:FINAL\s+)?ANSWER\s*(?:IS|:)\s*[\"']?\b([A-E])\b[\"']?",
+            r"(?:CORRECT\s+)?(?:OPTION|ANSWER)\s*(?:IS|WOULD BE|SHOULD BE)\s*[\"']?\b([A-E])\b[\"']?",
+            r"OPTION\s+([A-E])",
+            r"\*\*([A-E])\*\*",
+            r"\[([A-E])\]",
+        ]
+
+        # 1) Prefer explicit answer declarations.
+        for pattern in patterns:
+            matches = re.findall(pattern, response_upper)
             if matches:
-                # Take the last match (often models put the final answer at the very end)
-                return matches[-1].strip().upper()
-        
+                # Models often put their final answer at the end.
+                return matches[-1]
+
+        # 2) Fallback: inspect tail and pick last standalone A-E letter.
+        last_part = response_upper[-150:]
+        matches = re.findall(r"\b([A-E])\b", last_part)
+        if matches:
+            return matches[-1]
+
+        # 3) Fallback for models that output text labels instead of letters.
+        text_patterns = [
+            r"(?:FINAL\s+)?ANSWER\s*(?:IS|:)\s*(YES|NO|MAYBE)",
+            r"\b(YES|NO|MAYBE)\b",
+        ]
+        text_to_letter = {"YES": "A", "NO": "B", "MAYBE": "C"}
+        for pattern in text_patterns:
+            text_matches = re.findall(pattern, response_upper)
+            if text_matches:
+                return text_to_letter[text_matches[-1]]
+
         logger.warning(
             "Could not extract a letter answer from response",
             extra={"response_preview": response[:200]}
@@ -279,15 +311,16 @@ class PubMedQAEvaluator:
         start_time = time.time()
         
         try:
-            # Format prompt and run agent
-            prompt = question.to_prompt()
+            # Format prompt and enforce multiple-choice instruction.
+            base_prompt = question.to_prompt()
+            prompt = base_prompt + "\n\nINSTRUCTIONS: You must end your response with exactly this phrase: 'The final answer is: [Letter]' (replace [Letter] with A, B, C, D, or E)."
             result = await self.agent.answer_query(prompt)
             
             latency = time.time() - start_time
             
             # Extract answer from response
             predicted = self.extract_answer(result.answer)
-            correct = question.correct_answer_text.upper()
+            correct = question.correct_answer.upper()
             is_correct = predicted == correct
             
             logger.info(
@@ -308,6 +341,9 @@ class PubMedQAEvaluator:
                 is_correct=is_correct,
                 raw_response=result.answer,
                 sources=result.sources,
+                query_log=getattr(result, "query_log", []),
+                reasoning_steps=getattr(result, "reasoning_steps", []),
+                provider_used=getattr(result, "provider_used", None),
                 latency_seconds=latency,
             )
             
@@ -321,7 +357,7 @@ class PubMedQAEvaluator:
             return EvaluationResult(
                 question_id=question.question_id,
                 question=question.question,
-                correct_answer=question.correct_answer_text.lower(),
+                correct_answer=question.correct_answer.upper(),
                 predicted_answer="error",
                 is_correct=False,
                 latency_seconds=latency,
@@ -363,7 +399,11 @@ class PubMedQAEvaluator:
                     correct_answer=r["correct_answer"],
                     predicted_answer=r["predicted_answer"],
                     is_correct=r["is_correct"],
+                    raw_response=r.get("raw_llm_response", r.get("raw_response", "")),
                     sources=r.get("sources", []),
+                    query_log=r.get("query_log", []),
+                    reasoning_steps=r.get("reasoning_steps", []),
+                    provider_used=r.get("provider_used"),
                     latency_seconds=r.get("latency_seconds", 0),
                     error=r.get("error"),
                 ))
@@ -389,6 +429,10 @@ class PubMedQAEvaluator:
         output_path = self.output_dir / f"pubmedqa_eval_{timestamp}.json"
         
         for i, question in enumerate(questions):
+            print("\n" + "=" * 70)
+            print(f"🧪 QUESTION {len(results.results) + 1}/{total}: {question.question_id}")
+            print(question.question)
+            print("=" * 70)
             logger.info(
                 f"Progress: {len(results.results)}/{total}",
                 extra={"question_id": question.question_id}

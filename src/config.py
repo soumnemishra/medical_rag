@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     
     # GCP Configuration (for Vertex AI)
     GOOGLE_CLOUD_PROJECT: str = Field(
-        default="your-gcp-project-id",
+        default="aenticragmedrag",
         description="GCP project ID"
     )
     GOOGLE_CLOUD_LOCATION: str = Field(
@@ -54,8 +54,34 @@ class Settings(BaseSettings):
     
     # Gemini Configuration
     GEMINI_MODEL: str = Field(
-        default="gemini-2.0-flash",
+        default="gemini-2.5-pro",
         description="Gemini model to use"
+    )
+    # GitHub Models Configuration
+    GITHUB_TOKEN: Optional[str] = Field(
+        default=None,
+        description="GitHub Personal Access Token"
+    )
+    GITHUB_MODEL: str = Field(
+        default=" gpt-4o",
+        description="GitHub Model name"
+    )
+    
+    OLLAMA_MODEL: str = Field(
+        default="llama3",
+        description="Ollama model to use"
+    )
+    OLLAMA_BASE_URL: str = Field(
+        default="http://localhost:11434/api",
+        description="Ollama base URL"
+    )
+    OLLAMA_ENABLE_TOOLS: bool = Field(
+        default=False,
+        description="Enable tool-calling when using Ollama provider"
+    )
+    PROVIDER_CASCADE: list[str] = Field(
+        default_factory=lambda: ["ollama"],
+        description="Order of models to try"
     )
     
     # PubMed Configuration
@@ -68,7 +94,7 @@ class Settings(BaseSettings):
         description="NCBI API key for higher rate limits"
     )
     MAX_SEARCH_RESULTS: int = Field(
-        default=10,
+        default=3,
         description="Maximum PubMed results per query"
     )
     

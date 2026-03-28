@@ -36,6 +36,8 @@ Example Usage:
 """
 
 import logging # we log important events for easy debugging and monitoring 
+import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime # for date time filtering of articles 
 from enum import Enum # enum for study types 
@@ -139,6 +141,16 @@ class RetrievedDocument(BaseModel):
             authors_str += " et al."
         
         study_str = ", ".join(self.study_types[:2]) if self.study_types else "Article"
+
+        sentences = re.split(r"(?<=[.!?])\s+", self.abstract.strip())
+        if len(sentences) > 6:
+            squeezed_abstract = " ".join(sentences[:2]).strip()
+            squeezed_abstract += " ... [TRUNCATED] ... "
+            squeezed_abstract += " ".join(sentences[-2:]).strip()
+            if not squeezed_abstract.endswith("."):
+                squeezed_abstract += "."
+        else:
+            squeezed_abstract = self.abstract.strip()
         
         return (
             f"**{self.title}**\n"
@@ -146,8 +158,28 @@ class RetrievedDocument(BaseModel):
             f"Journal: {self.journal} ({self.year or 'N/A'})\n"
             f"Type: {study_str}\n"
             f"PMID: {self.pmid}\n\n"
-            f"{self.abstract}\n"
+            f"{squeezed_abstract}\n"
         )
+
+    def to_compact_context(self, max_sentences: int = 3, max_chars: int = 600) -> str:
+        """Format a shorter document context for small models."""
+        words = self.abstract.strip().split()
+        if len(words) > 100:
+            snippet = " ".join(words[:100]).rstrip() + "... [TRUNCATED FOR BASELINE]"
+        else:
+            snippet = " ".join(words).strip()
+
+        authors_str = ", ".join(self.authors[:2])
+        if len(self.authors) > 2:
+            authors_str += " et al."
+
+        return (
+            f"Title: {self.title}\n"
+            f"Authors: {authors_str}\n"
+            f"PMID: {self.pmid}\n"
+            f"Abstract snippet: {snippet}\n"
+        )
+
     def to_citation(self) -> str:
         """Format as citation."""
         authors_str = ", ".join(self.authors[:3])
@@ -211,6 +243,7 @@ class PubMedClient:
         - Pydantic validation layer
         - Exponential backoff retry
         - API key support for higher rate limits
+        #wait for sometime and then hit the api again if it fails due to transient error like network issue or rate limit
     """
     
     ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
@@ -249,6 +282,19 @@ class PubMedClient:
                 "filter_recent_years": filter_recent_years,
             }
         )
+
+    def close(self) -> None:
+        """Close the underlying HTTP session."""
+        if getattr(self, "_session", None) is not None:
+            self._session.close()
+
+    def __enter__(self):
+        """Support context manager usage."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Ensure session is closed when leaving context manager."""
+        self.close()
     
     def _get_base_params(self) -> dict:
         """Get base parameters including API key."""
@@ -621,27 +667,42 @@ class PubMedClient:
             >>> for doc in docs:
             ...     print(f"PMID:{doc.pmid} - {doc.title}")
         """
-        logger.info("Starting search pipeline", extra={"query": query[:100]})
+        logger.info(
+            "Starting search pipeline",
+            extra={
+                "query": query[:100],
+                "max_results": max_results or self.max_results,
+            },
+        )
+        start_time = time.perf_counter()
         
         # Stage 1: Search for PMIDs
+        esearch_start = time.perf_counter()
         pmids, metadata = self.esearch(query, max_results)
+        esearch_duration = time.perf_counter() - esearch_start
         
         if not pmids:
             logger.info("No PMIDs found", extra={"query": query[:50]})
             return []
         
         # Stage 2: Fetch articles
+        efetch_start = time.perf_counter()
         raw_articles = self.efetch(pmids)
+        efetch_duration = time.perf_counter() - efetch_start
         
         if not raw_articles:
             logger.warning("No articles fetched", extra={"pmid_count": len(pmids)})
             return []
         
         # Stage 3: Filter
+        filter_start = time.perf_counter()
         filtered_articles = self.filter_articles(raw_articles)
+        filter_duration = time.perf_counter() - filter_start
         
         # Stage 4: Validate
+        validate_start = time.perf_counter()
         validated_docs = self.validate_articles(filtered_articles)
+        validate_duration = time.perf_counter() - validate_start
         
         logger.info(
             "Search pipeline complete",
@@ -651,6 +712,11 @@ class PubMedClient:
                 "parsed": len(raw_articles),
                 "filtered": len(filtered_articles),
                 "validated": len(validated_docs),
+                "esearch_seconds": round(esearch_duration, 2),
+                "efetch_seconds": round(efetch_duration, 2),
+                "filter_seconds": round(filter_duration, 2),
+                "validate_seconds": round(validate_duration, 2),
+                "total_seconds": round(time.perf_counter() - start_time, 2),
             }
         )
         
